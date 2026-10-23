@@ -29,6 +29,7 @@ import {
   type Rule,
   type VaultFile,
 } from './masker'
+import { PATTERNS } from './patterns'
 
 /*
  * Where data flows and what this mod does there:
@@ -67,7 +68,8 @@ const PANE = 'pii-mask'
 const KINDS: Record<string, string> = {
   PERSON: 'People', EMAIL: 'Emails', PHONE: 'Phone numbers', ADDRESS: 'Addresses', IBAN: 'IBANs',
   ACCOUNT: 'Bank accounts', CARD: 'Card numbers', ID_NUMBER: 'ID numbers', PASSPORT: 'Passport numbers',
-  BIRTHDATE: 'Dates of birth', IP: 'IP addresses',
+  BIRTHDATE: 'Dates of birth', IP: 'IP addresses', MAC: 'Device addresses', LOCATION: 'Coordinates',
+  SECRET: 'Passwords and keys',
 }
 
 // Module state: rebuilt on every (re)load; the vault itself is restored from $.state.
@@ -310,9 +312,12 @@ async function nerFind($: EngineInterface, texts: readonly string[]): Promise<Ne
   return texts.flatMap(t => nerCache.get(t) ?? [])
 }
 
-/** The rules for one piece of content: what the model finds in it, plus every value found before. */
+/**
+ * The rules for one piece of content: the built-in patterns first, then what
+ * the model finds in it, then every value found before.
+ */
 async function rulesFor($: EngineInterface, texts: readonly string[]): Promise<Rule[]> {
-  return findRules(await nerFind($, texts), vault)
+  return [...PATTERNS, ...findRules(await nerFind($, texts), vault)]
 }
 
 /* ------------------------------------------------------------------ session */

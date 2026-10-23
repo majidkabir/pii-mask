@@ -5,7 +5,7 @@ Known gaps and what has not been verified yet.
 | # | Topic | Status |
 | --- | --- | --- |
 | 1 | [The real model hasn't run with the mod](#1-the-real-model-hasnt-run-with-the-mod) | ⚠️ Not verified |
-| 2 | [Misses go out as written](#2-misses-go-out-as-written) | ⚠️ By design |
+| 2 | [Misses go out as written](#2-misses-go-out-as-written) | 🟡 Patterns added in 0.3; names and addresses still rely on the model |
 | 3 | [Speed on big tool results](#3-speed-on-big-tool-results) | ❓ Not measured |
 | 4 | [Noise in code](#4-noise-in-code) | ❓ Not measured |
 | 5 | [First run blocks the session](#5-first-run-blocks-the-session) | ℹ️ By design |
@@ -17,14 +17,16 @@ Known gaps and what has not been verified yet.
 
 The machine pii-mask was built on could not reach Hugging Face, so GLiNER was never loaded there. What was verified, with a stand-in model that answers like the server (see [development](development.md)):
 
-- 35 automated tests of the masking, every hook and the pane, including first-run setup, starting the server, a slow model and a missing Python.
+- 87 automated tests of the masking, the built-in patterns (with true positives and ordinary text that must stay untouched), every hook and the pane, including first-run setup, starting the server, a slow model and a missing Python.
 - Real Claude Code 2.1.302 sessions: on first use the mod ran the setup and started the server by itself; a CSV of names, emails and phone numbers, and a prompt with a name and a phone number, reached the model as placeholders only; files Claude wrote through Bash got the real values.
 
 Still to verify on a real machine: that `setup.py` installs PyTorch and GLiNER and downloads the model, that the model loads within the 3-minute limit, and how well it finds what it should.
 
 ### 2. Misses go out as written
 
-There are no fallback rules: an email, phone number or name the model doesn't recognise is sent as written. Once it has found a value, the mod masks it everywhere after that, but the first miss is a leak. A fallback (regular expressions for emails, IBANs and phone numbers) would close part of this, but was left out on purpose to keep the detection in one place.
+Since 0.3, built-in patterns catch personal data with a fixed shape (emails, phone numbers, card numbers, IBANs, national ID numbers, keys; see [how it works](how-it-works.md#2b-built-in-patterns)), whether the model finds it or not. Names and addresses have no fixed shape, so for those a miss by the model is still sent as written. Once a value has been found, the mod masks it everywhere after that, but the first miss is a leak.
+
+Patterns can also be wrong the other way: a passphrase made only of letters (`correcthorsebattery`) looks like code and is not taken as a secret, phone formats outside the listed ones are left to the model, and an unusual number that happens to look like a phone number is masked (safe, but Claude then sees a placeholder).
 
 ### 3. Speed on big tool results
 

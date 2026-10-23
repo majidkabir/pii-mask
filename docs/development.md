@@ -10,12 +10,13 @@ pii-mask/
 ├── hooks/
 │   ├── hooks.json         # { "modules": ["./register.tsx"] }
 │   ├── register.tsx       # every hook, the model's life cycle, the saved table, the pane
-│   └── masker.ts          # pure logic: finds → placeholders, vault, stream unmasker
+│   ├── masker.ts          # pure logic: finds → placeholders, vault, stream unmasker
+│   └── patterns.ts        # built-in patterns for personal data with a fixed shape
 ├── server/
 │   ├── setup.py           # one-time install: venv, PyTorch, GLiNER, the model
 │   └── server.py          # the shared model server on 127.0.0.1:8766
 ├── types/index.d.ts       # the $.state contract
-├── tests/                 # masker.test.ts, register.test.ts
+├── tests/                 # masker, patterns and register (hooks + pane) tests
 ├── tools/unmask.mjs       # restores real values in claude -p output
 └── docs/
 ```

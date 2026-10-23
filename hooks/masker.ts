@@ -3,6 +3,7 @@
 // module turns what the model found into placeholders and back.
 
 import type { VaultEntry } from '../types'
+import { PATTERNS } from './patterns'
 
 /**
  * The oldest Claude Code this mod is tested on. On an older build a hook or
@@ -428,7 +429,7 @@ function holdFrom(buf: string): number {
 /** The note added to the system prompt, with examples in this session's form. */
 export function systemNote(vault: Vault): string {
   return (
-    `Personal data in this conversation (names, emails, phone numbers, addresses, ID and account numbers) has been ` +
+    `Personal data in this conversation (names, emails, phone numbers, addresses, ID and account numbers, passwords and keys) has been ` +
     `replaced with placeholders such as ${vault.format('PERSON_1')} or ${vault.format('EMAIL_2')}. ` +
     `A placeholder with a -2, -3 ... after its number, such as ${vault.format('PERSON_1-2')}, is another spelling of the same value. ` +
     'Use a placeholder exactly as written, including the part after the dot, wherever its real value belongs ' +
@@ -461,11 +462,12 @@ export function parseVaultFile(text: string): VaultFile {
   return data as VaultFile
 }
 
-/** Replaces every value the vault knows with its placeholder, wherever it appears as a whole word. */
+/**
+ * Masks text the model never saw (copies Claude Code writes on its own, output
+ * cut to a preview): the built-in patterns, then every value the vault knows.
+ */
 export function hideKnownValues(text: string, vault: Vault): string {
-  const values = vault.entries().filter(e => e.value.trim().length > 1)
-  if (values.length === 0) return text
-  return mask(text, findRules([], vault), vault)
+  return mask(text, [...PATTERNS, ...findRules([], vault)], vault)
 }
 
 /** Keys in a tool's structured record that name a file or folder rather than hold content. */

@@ -20,9 +20,12 @@ Claude answers *"I've written the reminder to ‹PERSON 1›"*, and you read **"
 
 ## What it hides
 
-Names · email addresses · phone numbers · home addresses · bank accounts and IBANs · card numbers · personal ID and passport numbers · dates of birth · IP addresses
+Names · email addresses · phone numbers · home addresses · bank accounts and IBANs · card numbers · personal ID numbers (US, UK, Denmark, Sweden, Norway, Finland, and any number labelled as an ID) · passport numbers · dates of birth · IP and device addresses · GPS coordinates · passwords and API keys
 
-You don't make a list or set anything up. A small AI model runs **on your own computer** and recognises personal data in any text, in many languages.
+You don't make a list or set anything up. Two things work together, both **on your own computer**:
+
+- **A small AI model** recognises personal data in any text, in many languages, including what has no fixed form, like names and addresses.
+- **A built-in checklist of about 30 patterns** catches everything with a fixed shape: email addresses, phone numbers, card numbers, IBANs, ID numbers, keys. Where a number has a check digit, the checklist verifies it, so ordinary numbers in your work aren't hidden by mistake. It also catches those when the model misses them.
 
 ## Get started
 

@@ -314,3 +314,13 @@ describe('the pane', () => {
     expect(JSON.stringify(b)).toContain('Lars Holm')
   })
 })
+
+describe('built-in patterns', () => {
+  test('catch what has a fixed shape even when the model finds nothing', async ($, on) => {
+    world(on, { finds: {} })
+    const stored = await appendPrompt($, 'Refund DK50 0040 0440 1162 43, card 4111 1111 1111 1111, mail lars@holm.dk')
+    const text = JSON.stringify(stored.message?.content)
+    const m = markerIn(text)
+    expect(text).toContain(`Refund ${ph('IBAN', 1, m)}, card ${ph('CARD', 1, m)}, mail ${ph('EMAIL', 1, m)}`)
+  })
+})

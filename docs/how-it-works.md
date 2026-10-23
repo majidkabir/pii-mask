@@ -41,6 +41,36 @@ sequenceDiagram
 - **A value found once stays masked.** Every value in the placeholder table is matched again in all later text, in any case and with any spacing, so a name the model recognised in one place is masked where it misses it in another.
 - **Mistakes are dropped.** Each label has a shape check: a person's name has no code characters or camelCase, an email has an `@`, a phone number at least 6 digits, a card number at least 12. Claude Code's own words (`Claude`, `Bash`, `JSON`, …) and the placeholder labels are never masked.
 
+## 2b. Built-in patterns
+
+Before the model's finds, every text passes [`hooks/patterns.ts`](../hooks/patterns.ts): patterns for personal data with a fixed shape. They catch what the model misses there and make those kinds exact. Where the data has a checksum, a match must pass it; context words are required where the shape alone is too common. They run in this order, and earlier ones win:
+
+| Kind | Placeholder | What counts |
+| --- | --- | --- |
+| Private keys | `SECRET` | a PEM `PRIVATE KEY` block |
+| Password in a URL | `SECRET` | the password in `scheme://user:password@host` |
+| API keys and tokens | `SECRET` | AWS, GitHub, Slack, Stripe, Google, Anthropic/OpenAI keys, JSON web tokens |
+| Password or key in a setting | `SECRET` | the value after `password`, `secret`, `api_key`, `token`, … `=` or `:`, unless it is code (`getPassword()`, `${VAR}`, `os.environ[…]`) |
+| Email | `EMAIL` | any address |
+| IBAN | `IBAN` | mod-97 check passes |
+| Card number | `CARD` | 13–19 digits, a card network's prefix, Luhn check passes |
+| Date of birth | `BIRTHDATE` | a date after "date of birth", "DOB", "born", "fødselsdato", "født", "född", "geboren", … |
+| Passport number | `PASSPORT` | 6–9 letters and digits after "passport", "pasnummer", "Reisepass", … |
+| Account number | `ACCOUNT` | digits after "account", "konto", "reg. nr.", … |
+| ID named as one | `ID_NUMBER` | a number after "SSN", "national ID", "tax ID", "CPR", "personnummer", "BSN", "DNI", "PESEL", … |
+| US Social Security number | `ID_NUMBER` | `NNN-NN-NNNN`, no 000/666/9xx area, 00 group or 0000 serial |
+| Danish CPR | `ID_NUMBER` | `DDMMYY-NNNN` with a real date |
+| Swedish personnummer | `ID_NUMBER` | `(YY)YYMMDD-NNNN`, Luhn check |
+| Norwegian fødselsnummer | `ID_NUMBER` | 11 digits, both mod-11 checks |
+| Finnish henkilötunnus | `ID_NUMBER` | `DDMMYY-NNNC`, check character |
+| UK National Insurance | `ID_NUMBER` | `AB 12 34 56 C`, valid prefixes |
+| MAC address | `MAC` | six hex pairs |
+| IPv6, IPv4 | `IP` | valid addresses; not `127.x`, `0.0.0.0`, `::1`, or a version number (`v1.2.3.4`, `==1.2.3.4`) |
+| Coordinates | `LOCATION` | a latitude and longitude with 4+ decimals |
+| Phone number | `PHONE` | `+` or `00` and a country code, 8–15 digits; or common national forms (`(555) 123-4567`, `020 7946 0958`, `07700 900123`, `12 34 56 78`) |
+
+Checked against 280 KB of real source code and documentation (this repository and customer-mask), the patterns flagged only the example personal data those files contain. A test also runs ordinary technical text through them (commit hashes, UUIDs, timestamps, version numbers, ports, prices, colours, times) and expects nothing to be found. One MB of mixed text takes under a second.
+
 ## 3. The model's life cycle
 
 ```mermaid
@@ -108,7 +138,7 @@ A hook that throws or runs past its 10-second budget is skipped by Claude Code, 
 
 **It fails closed.** If the model isn't running, is still installing, or doesn't answer within 7 seconds, the content is removed instead of sent, and requests are answered locally with the reason. A tool call whose arguments can't be restored is denied.
 
-## 7. What the model looks for
+## 7. What the model looks for (on top of the patterns)
 
 | The model's label | Placeholder |
 | --- | --- |
