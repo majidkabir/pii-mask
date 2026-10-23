@@ -1,0 +1,43 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Mods need a recent Claude Code. `plugin validate` and `plugin test` run
+      # offline and need no sign-in.
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@latest
+
+      - name: Validate manifest, marketplace and hooks module
+        run: claude plugin validate .
+
+      - name: Run the mod's tests
+        run: claude plugin test .
+
+      # The real model is not downloaded in CI; the server's fake mode checks
+      # setup, start-up, the API and that a second start exits quietly.
+      - name: Smoke-test the model server (fake mode)
+        run: |
+          python3 server/setup.py --cache "$RUNNER_TEMP/pii" --fake
+          python3 server/server.py --cache "$RUNNER_TEMP/pii" --daemon --fake
+          for i in 1 2 3 4 5 6 7 8 9 10; do curl -sf 127.0.0.1:8766/health && break; sleep 1; done
+          curl -sf -X POST 127.0.0.1:8766/detect \
+            -d '{"texts":["Mail Anna Berg at anna@berg.se"],"labels":["person","email"]}' | tee out.json
+          grep -q '"Anna Berg"' out.json && grep -q '"anna@berg.se"' out.json
+          python3 server/server.py --cache "$RUNNER_TEMP/pii" --daemon --fake

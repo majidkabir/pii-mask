@@ -1,0 +1,13 @@
+{
+  "name": "pii-mask",
+  "owner": {
+    "name": "Majid"
+  },
+  "plugins": [
+    {
+      "name": "pii-mask",
+      "source": "./"
+    }
+  ],
+  "description": "Claude Code mod that masks personal data with a local NER model before it reaches the model"
+}

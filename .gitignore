@@ -1,0 +1,6 @@
+# Written by Claude Code at load time for the editor; regenerated per version
+.claude-plugin/types/
+tsconfig.json
+node_modules/
+.DS_Store
+__pycache__/

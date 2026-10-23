@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""pii-mask's local model server: GLiNER PII behind a small HTTP API.
+
+The mod starts it when no session has (`--daemon`), and every session on the
+machine shares it. It listens on 127.0.0.1 only, logs nothing it is sent, and
+stops by itself after 30 minutes without requests.
+
+    <cache>/venv/bin/python server/server.py --cache ~/.cache/pii-mask [--daemon]
+
+API (JSON):
+    GET  /health  -> {"app": "pii-mask", "ok": true, "model": ...}
+    POST /detect  {"texts": [...], "labels": ["person", "email", ...], "threshold": 0.5}
+                  -> {"results": [[{"text", "label", "start", "end", "score"}, ...], ...]}
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+MODEL = "urchade/gliner_multi_pii-v1"
+MAX_BODY = 16 * 1024 * 1024
+CHUNK = 1000  # characters per model input; GLiNER reads about 384 words at a time
+LINE_NUMBER = re.compile(r"[ \t]*\d+\t")
+
+
+def pieces(text):
+    """Splits text into chunks of whole lines up to CHUNK characters (a longer
+    line is cut at a space), without the line numbers Claude Code's Read tool
+    adds. Yields (offset, chunk)."""
+    buf, start, offset = "", None, 0
+    for line in text.splitlines(keepends=True):
+        m = LINE_NUMBER.match(line)
+        skip = m.end() if m else 0
+        body = line[skip:]
+        pos = offset + skip
+        offset += len(line)
+        while len(body) > CHUNK:
+            cut = body.rfind(" ", 0, CHUNK)
+            cut = cut if cut > CHUNK // 2 else CHUNK
+            if buf:
+                yield start, buf
+                buf = ""
+            yield pos, body[:cut]
+            body, pos = body[cut:], pos + cut
+        if buf and pos - start + len(body) > CHUNK:  # the padding counts too
+            yield start, buf
+            buf = ""
+        if not buf:
+            start = pos
+            buf = body
+        else:
+            buf += " " * (pos - start - len(buf)) + body  # keep offsets: pad what was skipped
+    if buf.strip():
+        yield start, buf
+
+
+class Gliner:
+    def __init__(self, cache):
+        os.environ.setdefault("HF_HOME", os.path.join(cache, "hf"))
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")  # setup downloaded it; never fetch at run time
+        from gliner import GLiNER
+
+        self.name = MODEL
+        self.model = GLiNER.from_pretrained(MODEL)
+
+    def detect(self, texts, labels, threshold):
+        parts = [(i, off, chunk) for i, t in enumerate(texts) for off, chunk in pieces(t) if chunk.strip()]
+        results = [[] for _ in texts]
+        if not parts:
+            return results
+        chunks = [c for _, _, c in parts]
+        run = getattr(self.model, "inference", None) or getattr(self.model, "batch_predict_entities", None)
+        found = run(chunks, labels, threshold=threshold) if run else [
+            self.model.predict_entities(c, labels, threshold=threshold) for c in chunks
+        ]
+        for (i, off, _), ents in zip(parts, found):
+            for e in ents:
+                results[i].append({
+                    "text": e["text"], "label": e["label"],
+                    "start": e["start"] + off, "end": e["end"] + off,
+                    "score": round(float(e["score"]), 3),
+                })
+        return results
+
+
+class Fake:
+    """Tests only: a few fixed rules standing in for the model, so the mod and
+    the server can be tested where the real model can't be downloaded."""
+
+    NAMES = ["Lars Holm", "Mette Sørensen", "Peter Jensen", "Anna Berg"]
+    RULES = [
+        ("email", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")),
+        ("phone number", re.compile(r"\+\d{2}(?: ?\d{2}){4}")),
+        ("iban", re.compile(r"\b[A-Z]{2}\d{2}(?: ?\d{4}){3,5}(?: ?\d{1,3})?\b")),
+    ]
+
+    def __init__(self, cache):
+        self.name = "fake (tests only)"
+
+    def detect(self, texts, labels, threshold):
+        results = []
+        for t in texts:
+            found = []
+            for label, rx in self.RULES:
+                if label in labels:
+                    found += [{"text": m.group(), "label": label, "start": m.start(), "end": m.end(), "score": 0.99} for m in rx.finditer(t)]
+            if "person" in labels:
+                for n in self.NAMES:
+                    for m in re.finditer(re.escape(n), t):
+                        found.append({"text": n, "label": "person", "start": m.start(), "end": m.end(), "score": 0.95})
+            results.append(found)
+        return results
+
+
+def make_handler(backend, state):
+    lock = threading.Lock()  # one model call at a time
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):  # never log what was sent
+            pass
+
+        def answer(self, status, body):
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            state["last"] = time.time()
+            if self.path == "/health":
+                self.answer(200, {"app": "pii-mask", "ok": True, "model": backend.name})
+            else:
+                self.answer(404, {"error": "not found"})
+
+        def do_POST(self):
+            state["last"] = time.time()
+            if self.path != "/detect":
+                return self.answer(404, {"error": "not found"})
+            length = int(self.headers.get("content-length") or 0)
+            if length > MAX_BODY:
+                return self.answer(413, {"error": "request too large"})
+            try:
+                req = json.loads(self.rfile.read(length))
+                texts, labels = req["texts"], req["labels"]
+                threshold = float(req.get("threshold", 0.5))
+                if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
+                    raise ValueError("texts must be a list of strings")
+            except (ValueError, KeyError, TypeError) as err:
+                return self.answer(400, {"error": str(err)})
+            with lock:
+                results = backend.detect(texts, labels, threshold)
+            state["last"] = time.time()
+            self.answer(200, {"results": results})
+
+    return Handler
+
+
+def daemonize(log_path):
+    """Detaches from the mod: the call that started it returns at once, and the
+    server keeps running when that session ends."""
+    if os.fork() > 0:
+        os._exit(0)
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--cache", required=True)
+    p.add_argument("--port", type=int, default=8766)
+    p.add_argument("--idle", type=int, default=1800, help="seconds without requests before it stops (default 1800)")
+    p.add_argument("--daemon", action="store_true", help="detach and keep running after the caller exits")
+    p.add_argument("--fake", action="store_true", help="tests only: fixed rules instead of the model")
+    args = p.parse_args()
+    cache = os.path.abspath(os.path.expanduser(args.cache))
+    os.makedirs(cache, exist_ok=True)
+
+    # Bind first, so a second start (another session, same moment) exits quietly.
+    state = {"last": time.time()}
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), BaseHTTPRequestHandler)
+    except OSError:
+        print(f"pii-mask: port {args.port} is in use; another server is probably running", file=sys.stderr)
+        return 0
+    if args.daemon:
+        daemonize(os.path.join(cache, "server.log"))
+
+    started = time.time()
+    backend = Fake(cache) if args.fake else Gliner(cache)
+    backend.detect(["Warm-up: Anna Berg, anna@example.com."], ["person", "email"], 0.5)
+    server.RequestHandlerClass = make_handler(backend, state)
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pii-mask model server: {backend.name} ready in "
+          f"{time.time() - started:.1f} s on 127.0.0.1:{args.port}", flush=True)
+
+    def watchdog():
+        while True:
+            time.sleep(30)
+            if time.time() - state["last"] > args.idle:
+                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} idle for {args.idle} s, stopping", flush=True)
+                server.shutdown()
+                return
+
+    threading.Thread(target=watchdog, daemon=True).start()
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
