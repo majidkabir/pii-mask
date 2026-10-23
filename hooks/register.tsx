@@ -60,6 +60,15 @@ const LABELS = Object.keys(PII_LABELS)
 
 const vaultAtom = atom({ plugin: 'pii-mask', key: 'vault' } as const, [] as VaultEntry[])
 const markerAtom = atom({ plugin: 'pii-mask', key: 'marker' } as const, null as string | null)
+const statusAtom = atom({ plugin: 'pii-mask', key: 'status' } as const, `⏳ pii-mask: checking its model`)
+const PANE = 'pii-mask'
+
+/** How the pane names each kind of value. */
+const KINDS: Record<string, string> = {
+  PERSON: 'People', EMAIL: 'Emails', PHONE: 'Phone numbers', ADDRESS: 'Addresses', IBAN: 'IBANs',
+  ACCOUNT: 'Bank accounts', CARD: 'Card numbers', ID_NUMBER: 'ID numbers', PASSPORT: 'Passport numbers',
+  BIRTHDATE: 'Dates of birth', IP: 'IP addresses',
+}
 
 // Module state: rebuilt on every (re)load; the vault itself is restored from $.state.
 let vault = new Vault(newMarker())
@@ -98,11 +107,13 @@ function statusLine(): string {
 function setEngine($: EngineInterface, state: EngineState, detail = engine.detail): void {
   engine.state = state
   engine.detail = detail
+  const line = statusLine()
   try {
-    $.ui.status(statusLine())
+    $.ui.status(line)
   } catch {
     // No surface to show it on (headless): the state is still reported when a request is stopped.
   }
+  void update($, statusAtom, () => line).catch(() => undefined) // redraws the pane
 }
 
 /** Why requests are blocked, if they are: a block, or a model that isn't running. */
@@ -638,8 +649,8 @@ export const register: Register = on => {
     await reserveFromTranscript($)
     await $.command.register({
       name: 'pii-mask',
-      description: 'Show what pii-mask has replaced and how its local model is doing; "retry" restarts the model.',
-      argumentHint: '[retry]',
+      description: 'Open the pane listing everything pii-mask has masked; "status" prints it, "retry" restarts the model.',
+      argumentHint: '[status|retry]',
     })
     $.ui.status(statusLine())
     return next(e)
@@ -653,7 +664,13 @@ export const register: Register = on => {
       void startEngine($)
       return { text: 'Starting the local model again. The status line shows when it is ready.' }
     }
-    if (arg !== '') return { text: `Unknown option "${arg}". Use /pii-mask to see the status, or /pii-mask retry.` }
+    if (arg !== '' && arg !== 'status') {
+      return { text: `Unknown option "${arg}". Use /pii-mask to open the pane, /pii-mask status, or /pii-mask retry.` }
+    }
+    if (arg === '') {
+      const opened = await $.ui.open({ id: PANE, title: 'Masked by pii-mask' })
+      if (opened.isPlaced) return { text: `Opened the pii-mask pane: ${vault.size} value(s) masked so far. It updates as more are found.` }
+    }
     const rows = vault.entries().map(v => `  ${vault.format(v.token)}  →  ${v.value}`)
     return {
       text: [
@@ -667,4 +684,53 @@ export const register: Register = on => {
       ].join('\n'),
     }
   })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    const entries = await read($, vaultAtom)
+    const status = await read($, statusAtom)
+    const marker = (await read($, markerAtom)) ?? ''
+    const lines = paneLines(entries, marker)
+    const room = Math.max(3, (e.viewport?.rows ?? 30) - 5)
+    const shown = lines.length > room ? lines.slice(0, room - 1) : lines
+    return (
+      <Box flexDirection="column">
+        <Text bold>{status}</Text>
+        <Text dimColor>
+          {entries.length === 0
+            ? 'Nothing masked yet. Names, emails, phone numbers and other personal data appear here as they are found.'
+            : `${entries.length} value${entries.length === 1 ? '' : 's'} masked. Claude sees the placeholder; the real value stays on this machine.`}
+        </Text>
+        {shown.map(l =>
+          l.kind === 'head' ? (
+            <Text bold color="claude">{l.text}</Text>
+          ) : (
+            <Box flexDirection="row" gap={2}>
+              <Text color="success" wrap="truncate-end">{l.text}</Text>
+              <Text dimColor wrap="truncate-end">{l.sub ?? ''}</Text>
+            </Box>
+          ),
+        )}
+        {lines.length > shown.length && <Text dimColor>{`… ${lines.length - shown.length} more. /pii-mask status lists them all.`}</Text>}
+      </Box>
+    )
+  })
+}
+
+/**
+ * The pane: everything masked this session, grouped by kind, newest last.
+ * It reads the vault and the status from $.state, so it redraws by itself
+ * whenever a value is masked or the model's state changes. It shows real
+ * values; it is drawn on this machine only and never sent to the model.
+ */
+export function paneLines(entries: readonly VaultEntry[], marker: string): { kind: string; text: string; sub?: string }[] {
+  const lines: { kind: string; text: string; sub?: string }[] = []
+  const order = Object.keys(KINDS)
+  const labels = [...new Set(entries.map(e => e.label))].sort((a, b) => order.indexOf(a) - order.indexOf(b))
+  for (const label of labels) {
+    const group = entries.filter(e => e.label === label)
+    lines.push({ kind: 'head', text: `${KINDS[label] ?? label} (${group.length})` })
+    for (const e of group) lines.push({ kind: 'row', text: e.value, sub: `<<${e.token}.${marker}>>` })
+  }
+  return lines
 }

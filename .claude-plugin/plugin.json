@@ -1,6 +1,6 @@
 {
   "name": "pii-mask",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Replaces personal data (names, emails, phone numbers, addresses, IDs) with placeholders before anything reaches the model, using a local GLiNER model, and restores it in replies and tool calls. No config.",
   "author": { "name": "Majid" },
   "license": "MIT",

@@ -10,6 +10,8 @@ declare module 'claude-code' {
       vault: VaultEntry[]
       /** This session's placeholder marker. */
       marker: string | null
+      /** The status line's text, which the pane shows too. */
+      status: string
     }
   }
 }

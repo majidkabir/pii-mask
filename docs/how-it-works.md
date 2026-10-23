@@ -4,7 +4,7 @@ pii-mask is built like [customer-mask](https://github.com/majidkabir/customer-ma
 
 ## 1. The hooks
 
-All hooks are in [`hooks/register.ts`](../hooks/register.ts). The masking itself is a pure module, [`hooks/masker.ts`](../hooks/masker.ts), with no Claude Code dependency.
+All hooks are in [`hooks/register.tsx`](../hooks/register.tsx). The masking itself is a pure module, [`hooks/masker.ts`](../hooks/masker.ts), with no Claude Code dependency.
 
 | Event | What it does |
 | --- | --- |
@@ -18,6 +18,7 @@ All hooks are in [`hooks/register.ts`](../hooks/register.ts). The masking itself
 | `classic.SessionStart` | Finds the transcript; on resume, adopts the placeholder table saved beside it. |
 | `session.end` | Masks the copies Claude Code wrote to disk on its own, with every value found during the session. |
 | `session.start`, `command.run` | Status line and `/pii-mask`. |
+| `ui.render` (Pane) | Draws the pane `/pii-mask` opens: every masked value by kind with its placeholder, and the model's state. It reads both from the session's state, so it redraws by itself when a value is masked. It is drawn on this machine only. |
 
 ## 2. Finding the values
 
@@ -88,3 +89,39 @@ A hook that throws or runs past its 10-second budget is skipped by Claude Code, 
 | A model call fails or takes over 7 s | That row's text is removed; the system prompt's per-session parts are replaced by a note; injected text is left out |
 | Real values can't be restored in a tool call | The call is denied, and Claude can retry it |
 | Claude Code is older than 2.1.302, or the saved table can't be read | Every request is answered locally with the reason |
+
+## 6. What is covered
+
+| Data path | Masked? |
+| --- | --- |
+| Your prompts | ✅ |
+| File contents Claude reads, command output, search results (all tool results) | ✅ |
+| `CLAUDE.md`, `@file` mentions, reminders, the per-session parts of the system prompt | ✅ |
+| Subagents' conversations | ✅ |
+| Arguments of `WebSearch`, `WebFetch` and every MCP tool | ✅ kept masked |
+| A value the model found once, written again later (any case, any spacing) | ✅ masked even where the model misses it |
+| The session's files on disk (`~/.claude/projects/…`) | ✅ when the session ends; the placeholder table saved beside them holds the real values |
+| `claude -p` / SDK output | 🟡 masked; restore it with `… --output-format json \| node tools/unmask.mjs` |
+| Images and PDFs | ✅ removed before sending, and Claude is told why |
+| Personal data the model doesn't recognise | ❌ goes out as written; there are no fallback rules |
+| What the rest of the text gives away (a job title, a town, a story) | ❌ masking hides values, not context |
+
+**It fails closed.** If the model isn't running, is still installing, or doesn't answer within 7 seconds, the content is removed instead of sent, and requests are answered locally with the reason. A tool call whose arguments can't be restored is denied.
+
+## 7. What the model looks for
+
+| The model's label | Placeholder |
+| --- | --- |
+| person | `PERSON` |
+| email | `EMAIL` |
+| phone number | `PHONE` |
+| address | `ADDRESS` |
+| iban | `IBAN` |
+| bank account number | `ACCOUNT` |
+| credit card number | `CARD` |
+| social security number, national id number | `ID_NUMBER` |
+| passport number | `PASSPORT` |
+| date of birth | `BIRTHDATE` |
+| ip address | `IP` |
+
+A find counts at a confidence of 0.5 or more. Finds that can't be what their label says are dropped. That covers code the model mistakes for a name (`onMatch`, `RAW_FIELDS`), an "email" without `@`, a "phone number" with fewer than 6 digits, and Claude Code's own words (`Claude`, `Bash`, `JSON`, …). These checks only remove mistakes; they never find anything themselves.

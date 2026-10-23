@@ -8,8 +8,8 @@ pii-mask/
 │   ├── plugin.json        # mod manifest (name, version, state contract)
 │   └── marketplace.json   # makes this repo installable with /plugin install
 ├── hooks/
-│   ├── hooks.json         # { "modules": ["./register.ts"] }
-│   ├── register.ts        # every hook, the model's life cycle, the saved table
+│   ├── hooks.json         # { "modules": ["./register.tsx"] }
+│   ├── register.tsx       # every hook, the model's life cycle, the saved table, the pane
 │   └── masker.ts          # pure logic: finds → placeholders, vault, stream unmasker
 ├── server/
 │   ├── setup.py           # one-time install: venv, PyTorch, GLiNER, the model

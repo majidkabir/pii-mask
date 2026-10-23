@@ -1,5 +1,5 @@
 // Pure masking logic: no `$`, so it is unit-testable on its own.
-// Values are found by a local NER model (see register.ts and server/); this
+// Values are found by a local NER model (see register.tsx and server/); this
 // module turns what the model found into placeholders and back.
 
 import type { VaultEntry } from '../types'

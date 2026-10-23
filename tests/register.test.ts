@@ -274,3 +274,43 @@ describe('the local model\'s life cycle', () => {
     expect(seen.requestSent).toBe(false)
   })
 })
+
+describe('the pane', () => {
+  test('lists every masked value by kind, with its placeholder, on terminal and desktop', async ($, on) => {
+    world(on)
+    const stored = await appendPrompt($, 'Write to Lars Holm (lars@holm.dk).')
+    const m = markerIn(JSON.stringify(stored.message?.content))
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'pii-mask', surface, component: 'Pane', props: {} as never, requestId: 'pii-mask' })
+      const drawn = JSON.stringify(await ui.drawn())
+      expect(drawn).toContain('2 values masked')
+      expect(drawn).toContain('People (1)')
+      expect(drawn).toContain('Lars Holm')
+      expect(drawn).toContain(ph('PERSON', 1, m))
+      expect(drawn).toContain('Emails (1)')
+      await ui.unmount()
+    }
+  })
+
+  test('shows an empty state before anything is masked', async ($, on) => {
+    world(on)
+    const ui = await $.ui.mount({ plugin: 'pii-mask', surface: 'terminal', component: 'Pane', props: {} as never, requestId: 'pii-mask' })
+    expect(JSON.stringify(await ui.drawn())).toContain('Nothing masked yet')
+    await ui.unmount()
+  })
+
+  test('/pii-mask opens it; /pii-mask status prints the table', async ($, on) => {
+    world(on)
+    let opened = ''
+    on('ui.open', ($2, e) => {
+      opened = e.id
+      return { value: { isPlaced: true } } as never
+    })
+    await appendPrompt($, 'Lars Holm')
+    const a = await $.command.run({ command: 'pii-mask', args: '' } as never)
+    expect(opened).toBe('pii-mask')
+    expect(JSON.stringify(a)).toContain('Opened the pii-mask pane: 1 value(s) masked')
+    const b = await $.command.run({ command: 'pii-mask', args: 'status' } as never)
+    expect(JSON.stringify(b)).toContain('Lars Holm')
+  })
+})

@@ -17,7 +17,7 @@ Known gaps and what has not been verified yet.
 
 The machine pii-mask was built on could not reach Hugging Face, so GLiNER was never loaded there. What was verified, with a stand-in model that answers like the server (see [development](development.md)):
 
-- 32 automated tests of the masking and every hook, including first-run setup, starting the server, a slow model and a missing Python.
+- 35 automated tests of the masking, every hook and the pane, including first-run setup, starting the server, a slow model and a missing Python.
 - Real Claude Code 2.1.302 sessions: on first use the mod ran the setup and started the server by itself; a CSV of names, emails and phone numbers, and a prompt with a name and a phone number, reached the model as placeholders only; files Claude wrote through Bash got the real values.
 
 Still to verify on a real machine: that `setup.py` installs PyTorch and GLiNER and downloads the model, that the model loads within the 3-minute limit, and how well it finds what it should.
