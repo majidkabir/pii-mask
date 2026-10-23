@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pii-mask Flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@800;900&family=Instrument+Sans:wght@400;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* One scene, 1200 × 600, scaled to fit. A message crosses the pii-mask gate:
+   real values (amber) become placeholders (blue) on the way out, and real again on the way back.
+   The whole animation is a function of one clock value, so it can be captured frame by frame. */
+:root {
+  --stage: #0b1220; --panel: #121b2e; --panel-2: #172238; --rule: #24324d;
+  --text: #e9eef6; --muted: #8d99b2; --real: #f4a640; --real-bg: #3a2914;
+  --ph: #93abff; --ph-bg: #1d2752; --ok: #63d394;
+  --display: "Big Shoulders Display", "Arial Narrow", Impact, sans-serif;
+  --body: "Instrument Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--stage); }
+body { display: grid; place-items: center; overflow: hidden; font-family: var(--body); color: var(--text); }
+#scene { position: relative; width: 1200px; height: 600px; transform-origin: center; overflow: hidden;
+  background:
+    radial-gradient(700px 400px at 18% 60%, rgba(244,166,64,.07), transparent 70%),
+    radial-gradient(700px 400px at 85% 40%, rgba(147,171,255,.08), transparent 70%),
+    var(--stage); }
+.zone { position: absolute; top: 74px; bottom: 22px; border-radius: 18px; border: 1px solid var(--rule); }
+.zone.home { left: 22px; width: 520px; background: rgba(255,255,255,.015); }
+.zone.cloud { left: 640px; right: 22px; background: rgba(147,171,255,.03); }
+.zone-label { position: absolute; top: 14px; left: 18px; font-family: var(--mono); font-size: 12px; letter-spacing: .16em; color: var(--muted); }
+.brand { position: absolute; left: 26px; top: 18px; font-family: var(--display); font-weight: 900; font-size: 34px; letter-spacing: .03em; text-transform: uppercase; }
+.brand span { color: var(--ph); }
+.caption { position: absolute; left: 260px; right: 26px; top: 22px; text-align: right; font-family: var(--display); font-weight: 800; font-size: 30px; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; }
+.caption .n { color: var(--real); margin-right: 10px; }
+
+.gate { position: absolute; left: 589px; top: 74px; bottom: 22px; width: 4px; border-radius: 2px; background: var(--ph); box-shadow: 0 0 26px 6px rgba(147,171,255,.45); }
+.gate-tag { position: absolute; left: 591px; top: 300px; transform: translate(-50%, -50%); background: var(--stage); border: 2px solid var(--ph); border-radius: 14px; padding: 10px 12px; text-align: center; font-family: var(--mono); font-size: 12px; color: var(--ph); line-height: 1.25; box-shadow: 0 0 0 6px var(--stage); }
+.gate-tag b { display: block; font-size: 22px; line-height: 1; margin-bottom: 4px; }
+
+.card { position: absolute; background: var(--panel); border: 1px solid var(--rule); border-radius: 14px; padding: 14px 16px; }
+.card h4 { margin: 0 0 8px; font-size: 13px; font-family: var(--mono); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+.card .body { font-size: 17px; line-height: 1.55; min-height: 1.55em; }
+.card.lit { border-color: var(--ph); box-shadow: 0 0 0 1px var(--ph), 0 0 32px rgba(147,171,255,.25); }
+.card.lit-real { border-color: var(--real); box-shadow: 0 0 0 1px var(--real), 0 0 32px rgba(244,166,64,.22); }
+.badge { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; letter-spacing: 0; text-transform: none; }
+.badge.ok { color: var(--ok); } .badge.ph { color: var(--ph); }
+
+.r { color: var(--real); background: var(--real-bg); border-radius: 5px; padding: 0 5px; font-weight: 600; }
+.p { color: var(--ph); background: var(--ph-bg); border-radius: 5px; padding: 0 5px; font-family: var(--mono); font-size: .86em; }
+.caret { display: inline-block; width: 2px; height: 1.05em; background: var(--text); vertical-align: text-bottom; margin-left: 1px; }
+
+.packet { position: absolute; max-width: 420px; background: var(--panel-2); border: 1px solid var(--rule); border-radius: 12px; padding: 10px 13px; font-size: 15px; line-height: 1.5; box-shadow: 0 16px 34px -14px rgba(0,0,0,.7); will-change: transform; }
+.packet .tag { font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 3px; }
+</style>
+</head>
+<body>
+<div id="scene">
+  <div class="brand">pii<span>-</span>mask</div>
+  <div class="caption" id="caption"></div>
+  <div class="zone home"><span class="zone-label">YOUR COMPUTER</span></div>
+  <div class="zone cloud"><span class="zone-label">THE INTERNET</span></div>
+  <div class="gate"></div>
+
+  <div class="card" id="composer" style="left:46px; top:116px; width:472px; height:118px"><h4>You write</h4><div class="body" id="composerText"></div></div>
+  <div class="card" id="screen" style="left:46px; top:264px; width:472px; height:118px"><h4>Claude's answer, on your screen</h4><div class="body" id="screenText"></div></div>
+  <div class="card" id="file" style="left:46px; top:412px; width:472px; height:142px"><h4><span>reminder.txt</span><span id="fileBadge"></span></h4><div class="body" id="fileText"></div></div>
+
+  <div class="card" id="claude" style="left:690px; top:116px; width:466px; height:154px"><h4><span>Claude</span><span id="claudeBadge"></span></h4><div class="body" id="claudeText"></div></div>
+  <div class="card" id="web" style="left:690px; top:330px; width:466px; height:118px"><h4><span>Web search · connected apps</span><span id="webBadge"></span></h4><div class="body" id="webText"></div></div>
+
+  <div class="gate-tag"><b>🔒</b>pii-mask<br>on your<br>computer</div>
+  <div id="packets"></div>
+</div>
+<script>
+(() => {
+'use strict'
+const PERIOD = 12000
+const $ = id => document.getElementById(id)
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x))
+const ease = x => (x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2)
+const prog = (t, a, b) => clamp((t - a) / (b - a))
+
+// A line is a list of plain strings and [real, placeholder] pairs.
+const NAME = ['Anna Berg', '<<PERSON_1>>'], MAIL = ['anna@berg.se', '<<EMAIL_1>>'], TEL = ['+46 70 12 34 56', '<<PHONE_1>>']
+const MESSAGE = ['Send a reminder to ', NAME, ' at ', MAIL, ' and ', TEL, ' about the invoice.']
+const SEARCH = ['search: ', NAME, ' invoice due date']
+const REPLY = ['Done. I wrote the reminder to ', NAME, ' into reminder.txt.']
+const FILE = ['Dear ', NAME, ',\nyour invoice is due Friday.\nReply to ', MAIL, ' or call ', TEL, '.']
+
+const GLYPHS = '<>#%&*=+?/ABCDEFGHJKLMNPQRSTUVWXYZ0123456789'
+/** A value between real and placeholder: k = 0 real, 1 placeholder, scrambled in between. */
+function morph(pair, k, seed) {
+  const [real, ph] = pair
+  if (k <= 0) return `<span class="r">${esc(real)}</span>`
+  if (k >= 1) return `<span class="p">${esc(ph)}</span>`
+  const len = Math.round(real.length + (ph.length - real.length) * k)
+  let s = ''
+  for (let i = 0; i < len; i++) {
+    const fixed = i / len < k * 1.15 - .1
+    s += fixed ? (ph[i] ?? '') : GLYPHS[(i * 7 + seed * 13) % GLYPHS.length]
+  }
+  return `<span class="${k < .5 ? 'r' : 'p'}">${esc(s)}</span>`
+}
+/** Renders a line; `k` (0 real … 1 placeholder) applies to every pair. `chars` cuts it for typing. */
+function line(parts, k, seed = 0, chars = Infinity) {
+  let out = '', left = chars
+  for (const part of parts) {
+    if (left <= 0) break
+    if (typeof part === 'string') {
+      const s = part.slice(0, left); left -= part.length
+      out += esc(s).replace(/\n/g, '<br>')
+    } else {
+      if (left < part[0].length) { out += `<span class="r">${esc(part[0].slice(0, left))}</span>`; left = 0; break }
+      left -= part[0].length
+      out += morph(part, k, seed)
+    }
+  }
+  return out
+}
+const lenOf = parts => parts.reduce((n, p) => n + (typeof p === 'string' ? p.length : p[0].length), 0)
+
+// Card centres and edges the packets travel between.
+const P = {
+  composer: [282, 200], claudeIn: [920, 196], claudeOut: [900, 230], web: [920, 392],
+  screen: [282, 330], file: [282, 486],
+}
+const GATE_X = 591
+
+/** One travelling packet: where it is at time t, and how masked its values are (by which side of the gate it is on). */
+function packet(t, { from, to, start, dur, parts, tag, outbound }) {
+  const k = prog(t, start, start + dur)
+  if (t <= start || t > start + dur + 250) return '' // gone once it has landed
+  const e = ease(Math.min(1, k))
+  const x = from[0] + (to[0] - from[0]) * e
+  const y = from[1] + (to[1] - from[1]) * e - Math.sin(Math.PI * e) * 40
+  // Masked level: outbound packets turn blue as they cross the gate, inbound ones turn real.
+  const cross = clamp((outbound ? x - (GATE_X - 70) : (GATE_X + 70) - x) / 140)
+  const level = outbound ? cross : 1 - cross
+  const seed = Math.floor(t / 60)
+  return `<div class="packet" style="transform: translate(${x}px, ${y}px) translate(-50%, -50%)"><span class="tag">${tag}</span>${line(parts, level, seed)}</div>`
+}
+
+const CAPTIONS = [
+  [0, 1, 'You write a message'],
+  [2000, 2, 'pii-mask hides the personal data'],
+  [3700, 3, 'Claude only sees placeholders'],
+  [4900, 4, 'Searches and apps get placeholders too'],
+  [6500, 5, 'The answer comes back real'],
+  [8100, 6, 'So does the file Claude writes'],
+  [10300, '✓', 'Claude did the work. Your data stayed home.'],
+]
+
+function render(t) {
+  // 1. typing
+  const typed = Math.floor(lenOf(MESSAGE) * prog(t, 200, 1700))
+  const sentAt = 2000
+  $('composerText').innerHTML = t < sentAt ? line(MESSAGE, 0, 0, typed) + (t % 900 < 500 ? '<span class="caret"></span>' : '') : '<span style="color:var(--muted)">Sent.</span>'
+  $('composer').classList.toggle('lit-real', t > 1500 && t < 2200)
+
+  // packets
+  let html = ''
+  html += packet(t, { from: P.composer, to: P.claudeIn, start: 2000, dur: 1700, parts: MESSAGE, tag: 'your message → Claude', outbound: true })
+  html += packet(t, { from: P.claudeOut, to: P.web, start: 4900, dur: 900, parts: SEARCH, tag: 'Claude → web search', outbound: true })
+  html += packet(t, { from: P.claudeOut, to: P.screen, start: 6500, dur: 1600, parts: REPLY, tag: 'Claude → your screen', outbound: false })
+  html += packet(t, { from: P.claudeOut, to: P.file, start: 8100, dur: 1600, parts: FILE.slice(0, 2).concat(['…']), tag: 'Claude → reminder.txt', outbound: false })
+  $('packets').innerHTML = html
+
+  // Claude
+  const claudeHas = t >= 3700
+  $('claude').classList.toggle('lit', t >= 3700 && t < 6600)
+  $('claudeText').innerHTML = claudeHas ? `<span style="color:var(--muted)">reads:</span> ${line(MESSAGE, 1)}` : '<span style="color:var(--muted)">waiting…</span>'
+  $('claudeBadge').innerHTML = claudeHas ? '<span class="badge ph">placeholders only</span>' : ''
+
+  // Web
+  const webHas = t >= 5800
+  $('web').classList.toggle('lit', t >= 5800 && t < 7000)
+  $('webText').innerHTML = webHas ? `<span style="color:var(--muted)">receives:</span> ${line(SEARCH.slice(1), 1)}` : '<span style="color:var(--muted)">–</span>'
+  $('webBadge').innerHTML = webHas ? '<span class="badge ph">no real data</span>' : ''
+
+  // Screen and file
+  $('screenText').innerHTML = t >= 8100 - 0 ? line(REPLY, 0) : '<span style="color:var(--muted)">–</span>'
+  $('screen').classList.toggle('lit-real', t >= 8100 && t < 9000)
+  $('fileText').innerHTML = t >= 9700 ? line(FILE, 0) : '<span style="color:var(--muted)">–</span>'
+  $('file').classList.toggle('lit-real', t >= 9700)
+  $('fileBadge').innerHTML = t >= 9700 ? '<span class="badge ok">real values ✓</span>' : ''
+
+  // captions
+  const cap = [...CAPTIONS].reverse().find(c => t >= c[0])
+  $('caption').innerHTML = cap ? `<span class="n">${cap[1]}</span>${cap[2]}` : ''
+  $('scene').style.opacity = 1 - prog(t, PERIOD - 450, PERIOD)
+}
+
+function fit() {
+  const s = Math.min(innerWidth / 1200, innerHeight / 600)
+  $('scene').style.transform = `scale(${s})`
+}
+addEventListener('resize', fit)
+fit()
+
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
+if (reduced) { render(11000); return }
+let t0 = null
+function frame(now) {
+  if (t0 === null) t0 = now
+  render((now - t0) % PERIOD)
+  requestAnimationFrame(frame)
+}
+requestAnimationFrame(frame)
+})()
+</script>
+</body>
+</html>

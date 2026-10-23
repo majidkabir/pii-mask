@@ -2,6 +2,8 @@
 
 **Use Claude Code without sending your personal data to the cloud.**
 
+<img src="docs/assets/flow.gif" alt="A message with a name, an email and a phone number passes pii-mask on its way to Claude and turns into placeholders; a web search gets placeholders too; Claude's answer and the file it writes come back with the real values." width="100%">
+
 When you work with Claude Code, everything it reads goes to Claude: your messages, your files, the output of your commands. If those contain names, email addresses, phone numbers or account numbers, they go along too.
 
 pii-mask stops that. Before anything leaves your computer, it swaps personal data for harmless placeholders. Claude works with the placeholders, and you still see the real values in every answer and in every file Claude writes for you.

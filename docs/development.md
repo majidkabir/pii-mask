@@ -52,6 +52,10 @@ curl -s -X POST 127.0.0.1:8766/detect \
 
 `--idle <seconds>` changes when it stops (default 1800).
 
+## The README animation
+
+`docs/assets/flow.gif` is captured from [`docs/assets/flow.html`](assets/flow.html), which draws the whole animation from one clock value. Open the HTML in a browser to see it live. To rebuild the GIF, capture it frame by frame with Playwright's clock paused and stepped (15 fps over the 12-second loop), then encode with ffmpeg (`palettegen` / `paletteuse`, 960 px wide).
+
 ## Releasing
 
 Bump `version` in `.claude-plugin/plugin.json` (`claude plugin update` compares it), make sure CI is green, push to `main`.
