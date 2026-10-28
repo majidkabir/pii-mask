@@ -2,13 +2,13 @@
 
 import unittest
 
-from setup import pick_python, plan
+from setup import error_in, fix_for, pick_python, plan
 
 
 class Plan(unittest.TestCase):
     def test_intel_mac_pins_the_last_pytorch_built_for_it(self):
         p = plan("Darwin", "x86_64")
-        self.assertEqual(p["python_max"], (3, 12))
+        self.assertEqual(p["python_max"], (3, 11))  # PyTorch 2.2's compiler doesn't run on 3.12
         self.assertIn("torch==2.2.2", p["torch"])
         self.assertIn("numpy<2", p["torch"])
         self.assertTrue(any(x.startswith("transformers") and "<4.58" in x for x in p["extra"]))
@@ -21,13 +21,35 @@ class Plan(unittest.TestCase):
     def test_python_choice(self):
         which = {"python3.12": "/opt/py312", "python3.11": "/opt/py311"}.get
         # A suitable Python is used as it is.
-        self.assertEqual(pick_python((3, 12), which, ("/usr/bin/python3", (3, 11))), "/usr/bin/python3")
+        self.assertEqual(pick_python((3, 11), which, ("/usr/bin/python3", (3, 11))), "/usr/bin/python3")
         self.assertEqual(pick_python(None, which, ("/usr/bin/python3", (3, 13))), "/usr/bin/python3")
-        # Too new: the newest suitable one on the PATH.
-        self.assertEqual(pick_python((3, 12), which, ("/usr/bin/python3", (3, 13))), "/opt/py312")
-        self.assertEqual(pick_python((3, 12), {"python3.10": "/opt/py310"}.get, ("/x", (3, 13))), "/opt/py310")
+        # Too new: the newest suitable one on the PATH (3.12 is skipped on an Intel Mac).
+        self.assertEqual(pick_python((3, 11), which, ("/usr/bin/python3", (3, 12))), "/opt/py311")
+        self.assertEqual(pick_python((3, 11), {"python3.10": "/opt/py310"}.get, ("/x", (3, 13))), "/opt/py310")
         # None found.
-        self.assertIsNone(pick_python((3, 12), lambda _: None, ("/x", (3, 13))))
+        self.assertIsNone(pick_python((3, 11), lambda _: None, ("/x", (3, 12))))
+
+
+class Errors(unittest.TestCase):
+    def test_names_the_root_cause_of_a_chained_exception(self):
+        log = """Traceback (most recent call last):
+  File "modeling_modernbert.py", line 207, in ModernBertEmbeddings
+    @torch.compile(dynamic=True)
+RuntimeError: Dynamo is not supported on Python 3.12+
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: Could not import module 'ModernBertModel'. Are this object's requirements defined correctly?""".splitlines()
+        msg = error_in(log)
+        self.assertTrue(msg.startswith("RuntimeError: Dynamo is not supported on Python 3.12+"), msg)
+        self.assertIn("ModernBertModel", msg)
+        self.assertIn("python@3.11", fix_for(msg, "Darwin"))
+
+    def test_pip_error_line_wins(self):
+        self.assertEqual(error_in(["Collecting torch", "ERROR: No matching distribution found for torch"]),
+                         "ERROR: No matching distribution found for torch")
 
 
 if __name__ == "__main__":

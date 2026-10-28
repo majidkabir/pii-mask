@@ -28,9 +28,11 @@ GLINER = "gliner>=0.2.16,<0.3"
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 
-# Intel Macs: PyTorch 2.2.2 is the last release built for them, and only for
-# Python 3.9-3.12. It was built against numpy 1, and transformers 4.57 is the
-# newest release checked to accept PyTorch 2.2.
+# Intel Macs: PyTorch 2.2.2 is the last release built for them. Its compiler
+# (torch.compile) does not support Python 3.12, and transformers uses it when
+# GLiNER is imported ("Dynamo is not supported on Python 3.12+"), so these Macs
+# need Python 3.11 or older. It was built against numpy 1, and transformers
+# 4.57 is the newest release checked to accept PyTorch 2.2.
 INTEL_MAC_TORCH = ["torch==2.2.2", "numpy<2"]
 INTEL_MAC_EXTRA = ["transformers>=4.51.3,<4.58", "numpy<2"]
 
@@ -57,16 +59,37 @@ def report_size(cache, stop):
 
 
 def last_error(log_path):
-    """The last line in the log that says what went wrong (pip's "ERROR: ...", a Python exception)."""
+    """What went wrong, from the end of the log: pip's "ERROR: ..." line, or a
+    Python exception. When one exception caused another, the first one is the
+    real reason ("RuntimeError: Dynamo is not supported..." behind "Could not
+    import module ..."), so it is named first."""
     try:
-        lines = open(log_path, encoding="utf-8", errors="replace").read().splitlines()[-200:]
+        lines = open(log_path, encoding="utf-8", errors="replace").read().splitlines()[-300:]
     except OSError:
         return ""
-    for line in reversed(lines):
-        s = line.strip()
-        if s.startswith("ERROR:") or re_exception(s):
+    return error_in(lines)
+
+
+def error_in(lines):
+    stripped = [l.strip() for l in lines]
+    for s in reversed(stripped):
+        if s.startswith("ERROR:"):
             return s[:300]
-    return ""
+    exceptions = [i for i, s in enumerate(stripped) if re_exception(s)]
+    if not exceptions:
+        return ""
+    last = exceptions[-1]
+    # Walk back through "The above exception was the direct cause / During handling ..." to the first cause.
+    root = last
+    for i in reversed(exceptions[:-1]):
+        between = " ".join(stripped[i + 1:root])
+        if "direct cause of the following exception" in between or "During handling of the above exception" in between:
+            root = i
+        else:
+            break
+    if root == last:
+        return stripped[last][:300]
+    return f"{stripped[root][:200]} (then: {stripped[last][:120]})"
 
 
 def re_exception(line):
@@ -79,8 +102,10 @@ def fix_for(reason, system):
     r = reason.lower()
     if "ensurepip" in r or "venv" in r and system == "Linux":
         return "sudo apt install python3-venv"
+    if "dynamo is not supported on python 3.12" in r:
+        return "install Python 3.11 (brew install python@3.11), then /pii-mask retry"
     if "no matching distribution found for torch" in r:
-        return "install Python 3.12 (brew install python@3.12, or your package manager), then /pii-mask retry"
+        return "install Python 3.11 (brew install python@3.11, or your package manager), then /pii-mask retry"
     if "no space left" in r:
         return "free some disk space (about 3 GB), then /pii-mask retry"
     if "connection" in r or "timed out" in r or "temporary failure in name resolution" in r:
@@ -96,7 +121,7 @@ def plan(system, machine):
     """What to install where: the Python versions PyTorch has builds for, the
     PyTorch packages, and anything GLiNER's dependencies must be held to."""
     if is_intel_mac(system, machine):
-        return {"python_max": (3, 12), "torch": INTEL_MAC_TORCH, "extra": INTEL_MAC_EXTRA, "cpu_index": False}
+        return {"python_max": (3, 11), "torch": INTEL_MAC_TORCH, "extra": INTEL_MAC_EXTRA, "cpu_index": False}
     return {"python_max": None, "torch": ["torch"], "extra": [], "cpu_index": system == "Linux"}
 
 
