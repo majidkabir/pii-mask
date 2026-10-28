@@ -34,6 +34,10 @@ type World = {
   version?: string
   /** A Windows machine: its environment, and output lines ending in \r\n. */
   windows?: boolean
+  /** More files that exist. */
+  files?: Record<string, string>
+  /** Starting the server does nothing (it crashes). */
+  serverNeverStarts?: boolean
 }
 
 const FINDS: Record<string, string> = {
@@ -46,7 +50,7 @@ const FINDS: Record<string, string> = {
 function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
   const cache = w.windows ? WIN_CACHE : CACHE
-  const files: Record<string, string> = w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }
+  const files: Record<string, string> = { ...(w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }), ...w.files }
   const seen = { answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
   let up = w.up !== false
   const finds = w.finds ?? FINDS
@@ -81,7 +85,7 @@ function world(on: On, w: World = {}) {
     if (e.argv.includes('-c')) {
       return w.noPython ? { deny: 'ENOENT' } : { value: { exitCode: 0, stdout: 'True\n', stderr: '' } as never }
     }
-    if (e.argv.some(a => a.endsWith('server/server.py'))) up = true
+    if (e.argv.some(a => a.endsWith('server/server.py')) && !w.serverNeverStarts) up = true
     return { value: { exitCode: 0, stdout: '', stderr: '' } as never }
   })
   on('process.spawn', async function* ($, e) {
@@ -313,11 +317,38 @@ describe('the local model\'s life cycle', () => {
     expect(start).toContain('--daemon')
   })
 
-  test('no Python: every request is stopped with the reason', async ($, on) => {
+  test('no Python: the install fails, so pii-mask is off and requests go through as written', async ($, on) => {
     const { seen, clock } = world(on, { up: false, installed: false, noPython: true })
-    const pending = collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+    const pending = appendPrompt($, 'Write to Lars Holm')
     await clock.advance(7000)
-    expect(textOf(await pending)).toContain('Python 3.9 or newer is needed')
+    expect(JSON.stringify((await pending).message?.content)).toContain('Write to Lars Holm')
+    await collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+    expect(seen.requestSent).toBe(true)
+    expect(seen.status.at(-1)).toContain('off')
+    const { text } = await $.command.run({ command: 'pii-mask', args: 'status' } as never) as { text: string }
+    expect(text).toContain('Python 3.9 or newer is needed')
+    expect(text).toContain('without masking')
+  })
+
+  test('a failed install is remembered: the next session is off at once and runs no setup; retry runs it again', async ($, on) => {
+    const { seen, clock } = world(on, {
+      installed: false,
+      up: false,
+      files: { [`${CACHE}/install-failed.json`]: JSON.stringify({ version: '', reason: 'installing PyTorch failed: boom', fix: '' }) },
+    })
+    const stored = await appendPrompt($, 'Write to Lars Holm')
+    expect(JSON.stringify(stored.message?.content)).toContain('Lars Holm')
+    expect(seen.spawns).toHaveLength(0)
+    await $.command.run({ command: 'pii-mask', args: 'retry' } as never)
+    await clock.advance(1000)
+    expect(seen.spawns).toHaveLength(1)
+  })
+
+  test('once installed, a model that stops working still holds requests (it is on)', async ($, on) => {
+    const { seen, clock } = world(on, { installed: true, up: false, serverNeverStarts: true })
+    const pending = collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+    await clock.advance(200_000)
+    expect(textOf(await pending)).toContain('stopped this request')
     expect(seen.requestSent).toBe(false)
   })
 
@@ -511,15 +542,13 @@ describe('the panel above the prompt', () => {
     await pending
     const ui = await mountBand($)
     const drawn = JSON.stringify(await ui.drawn())
-    expect(drawn).toContain("can't start its local model")
+    expect(drawn).toContain("pii-mask is off: it couldn't install its local model")
     expect(drawn).toContain('needs Python 3.12 or older')
     expect(drawn).toContain('To fix it: brew install python@3.12')
+    expect(drawn).toContain('without masking')
     expect(await ui.find({ key: 'retry' })).toBeDefined()
     expect(await ui.find({ key: 'details' })).toBeDefined()
     await ui.unmount()
-    // The answer to a request says the same.
-    const chunks = await collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
-    expect(textOf(chunks)).toContain('To fix it: brew install python@3.12')
   })
 
   test('no Python at all: the fix names how to install it', async ($, on) => {

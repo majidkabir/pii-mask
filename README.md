@@ -47,7 +47,9 @@ You need Claude Code on a Mac, Linux or Windows computer, and Python 3.9 or newe
 412 MB so far · 1 min 40 s on this step · Nothing is sent to Claude until it's ready.
 ```
 
-If something goes wrong, the panel says what, and gives you the exact command that fixes it, with a **Retry** button. When it's done, a message says **pii-mask is on**, the panel goes away, and nothing is sent to Claude before that.
+When it's done, a message says **pii-mask is on** and the panel goes away. Nothing is sent to Claude while it installs.
+
+If the install fails, pii-mask turns itself **off**, and Claude Code works as if it weren't installed: your messages go to Claude without masking. The panel says why, gives you the exact command that fixes it, and has a **Retry** button; the status line shows `pii-mask: ⚠ off` until a retry succeeds. pii-mask is only on once its model is installed.
 
 **3. Work as usual.** From then on, it starts by itself whenever you open Claude Code.
 

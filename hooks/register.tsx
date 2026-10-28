@@ -89,8 +89,8 @@ let loading: Promise<void> | undefined
 
 /* ----------------------------------------------------------------- the model */
 
-type EngineState = 'unknown' | 'installing' | 'starting' | 'ready' | 'failed'
-const engine = { state: 'unknown' as EngineState, detail: '', cache: '', fix: '', step: 0, steps: 0, mb: 0, since: Date.now() }
+type EngineState = 'unknown' | 'installing' | 'starting' | 'ready' | 'failed' | 'off'
+const engine = { state: 'unknown' as EngineState, detail: '', cache: '', fix: '', step: 0, steps: 0, mb: 0, since: Date.now(), fresh: false }
 
 /** A failure with a known fix, shown with the reason. */
 class EngineError extends Error {
@@ -98,6 +98,15 @@ class EngineError extends Error {
     super(message)
   }
 }
+/**
+ * The first-time install failed. pii-mask is then off: nothing is masked and
+ * nothing is held, as if it weren't installed, until a retry succeeds. It is
+ * only on once its model is installed. (Once installed, a model that stops
+ * working holds requests instead: by then you rely on it.)
+ */
+class InstallFailed extends EngineError {}
+/** Where a failed install is remembered, so a new session doesn't run it again until a retry or a new version. */
+const FAILED_FILE = 'install-failed.json'
 let engineTask: Promise<void> | undefined
 /** Set when context Claude Code computes once was replaced by a note; re-rendered once the model runs. */
 let contextRedacted = false
@@ -115,6 +124,7 @@ function statusLine(): string {
     case 'installing': return `⏳ installing its model (${engine.detail || 'first run'})`
     case 'starting': return '⏳ starting its model'
     case 'failed': return '🔒 model not running'
+    case 'off': return '⚠ off: its model is not installed (/pii-mask retry)'
     default: return '⏳ checking its model'
   }
 }
@@ -124,7 +134,7 @@ function setEngine($: EngineInterface, state: EngineState, detail = engine.detai
   if (state !== was) engine.since = Date.now()
   engine.state = state
   engine.detail = detail
-  engine.fix = state === 'failed' ? fix : ''
+  engine.fix = state === 'failed' || state === 'off' ? fix : ''
   if (state !== 'installing') {
     engine.step = 0
     engine.steps = 0
@@ -138,14 +148,19 @@ function setEngine($: EngineInterface, state: EngineState, detail = engine.detai
     }
   }
   if (state === 'failed' && was !== 'failed') say(`${NAME} can't start its model: ${detail}`)
-  if (state === 'ready' && (was === 'installing' || was === 'failed')) say(`${NAME} is on: personal data is masked from now on.`)
+  if (state === 'off' && was !== 'off') {
+    say(engine.fresh
+      ? `${NAME} couldn't install its model, so it is off: messages go to Claude without masking. /pii-mask retry tries again.`
+      : `${NAME} is off: its model isn't installed (the last try failed). /pii-mask retry tries again.`)
+  }
+  if (state === 'ready' && (was === 'installing' || was === 'failed' || was === 'off')) say(`${NAME} is on: personal data is masked from now on.`)
 }
 
 /** Redraws the panel and the pane with the model's current state. */
 function showEngine($: EngineInterface): void {
   const view: EngineView = {
     state: engine.state, step: engine.step, steps: engine.steps, detail: engine.detail, fix: engine.fix,
-    mb: engine.mb, since: engine.since, now: Date.now(), folder: engine.cache,
+    mb: engine.mb, since: engine.since, now: Date.now(), folder: engine.cache, fresh: engine.fresh,
   }
   void update($, engineAtom, () => view).catch(() => undefined)
 }
@@ -190,10 +205,12 @@ function blocked(): string | undefined {
   const b = blocks.values().next().value
   if (b) return b
   switch (engine.state) {
-    case 'ready': return undefined
+    case 'ready':
+    case 'off': // the install failed: nothing is held, as if pii-mask weren't installed
+      return undefined
     case 'installing':
       return `pii-mask is installing its local model, once (about 1–2 GB; now: ${engine.detail || 'starting'}). ` +
-        'Send your message again when the status line shows "🔒 pii-mask on".'
+        'Send your message again when the status line shows "pii-mask: 🔒 on".'
     case 'failed':
       return `pii-mask can't run its local model: ${engine.detail}` +
         (engine.fix ? ` To fix it: ${engine.fix}.` : '') + ' Then run /pii-mask retry.'
@@ -272,59 +289,117 @@ async function findPython($: EngineInterface): Promise<string[]> {
   )
 }
 
-/** Starts the model if it isn't running, once at a time. Never rejects. */
-function startEngine($: EngineInterface): Promise<void> {
-  engineTask ??= runEngine($)
-    .catch(err => setEngine($, 'failed', err instanceof Error ? err.message : String(err), err instanceof EngineError ? err.fix : ''))
+/**
+ * Starts the model if it isn't running, once at a time. Never rejects.
+ * `retry` runs an install that failed before again.
+ */
+function startEngine($: EngineInterface, retry = false): Promise<void> {
+  engineTask ??= runEngine($, retry)
+    .catch(err => {
+      const fix = err instanceof EngineError ? err.fix : ''
+      const reason = err instanceof Error ? err.message : String(err)
+      if (err instanceof InstallFailed) {
+        engine.fresh = true
+        setEngine($, 'off', reason, fix)
+      } else {
+        setEngine($, 'failed', reason, fix)
+      }
+    })
     .finally(() => {
       engineTask = undefined
     })
   return engineTask
 }
 
-async function runEngine($: EngineInterface): Promise<void> {
+async function pluginVersion($: EngineInterface): Promise<string> {
+  try {
+    return String((JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`)) as { version?: unknown }).version ?? '')
+  } catch {
+    return ''
+  }
+}
+
+async function runEngine($: EngineInterface, retry: boolean): Promise<void> {
   if (await serverUp($)) return engineReady($)
   const dir = await cacheDir($)
   engine.cache = dir
   const fake = (await $.env.get('PII_MASK_FAKE_MODEL')) === '1'
-  const python = await findPython($)
   const root = $.plugin.root
+  const installed = await $.fs.exists(`${dir}/installed.json`)
+  let python: string[] = []
 
-  if (!(await $.fs.exists(`${dir}/installed.json`))) {
-    engine.mb = 0
-    setEngine($, 'installing', 'preparing')
-    const argv = [...python, `${root}/server/setup.py`, '--cache', dir, ...(fake ? ['--fake'] : [])]
-    const it = $.process.spawn({ argv })[Symbol.asyncIterator]()
-    let lastError = ''
-    let fix = ''
-    let buffered = ''
-    for (;;) {
-      const step = await it.next()
-      if (step.done) {
-        if (step.value.code !== 0) throw new EngineError(lastError || 'the installation failed.', fix)
-        break
-      }
-      buffered += step.value.text
-      const lines = buffered.split('\n')
-      buffered = lines.pop() ?? ''
-      for (const raw of lines) {
-        const line = raw.replace(/\r$/, '') // Windows ends lines with \r\n
-        const m = /^STEP (\d+)\/(\d+) (.*)$/.exec(line)
-        if (m) {
-          engine.step = Number(m[1])
-          engine.steps = Number(m[2])
-          engine.since = Date.now()
-          engine.detail = m[3] ?? ''
-          publishStatus($)
-        } else if (line.startsWith('SIZE ')) {
-          engine.mb = Math.round(Number(line.slice(5)) / 1e6)
-          showEngine($)
-        } else if (line.startsWith('ERROR ')) lastError = line.slice(6).trim()
-        else if (line.startsWith('FIX ')) fix = line.slice(4).trim()
+  if (!installed) {
+    // An install that failed before, with this version, isn't run again on its own.
+    const version = await pluginVersion($)
+    if (!retry) {
+      try {
+        const before = JSON.parse(await $.fs.read(`${dir}/${FAILED_FILE}`)) as { version?: string; reason?: string; fix?: string }
+        if (before.version === version) {
+          engine.fresh = false
+          setEngine($, 'off', before.reason ?? 'the install failed.', before.fix ?? '')
+          return
+        }
+      } catch {
+        // none recorded
       }
     }
+    try {
+      python = await findPython($)
+      await install($, python, dir, root, fake)
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      const fix = err instanceof EngineError ? err.fix : ''
+      try {
+        await $.fs.write(`${dir}/${FAILED_FILE}`, JSON.stringify({ version, reason, fix, at: new Date(Date.now()).toISOString() }))
+      } catch {
+        // can't remember it: the next session tries again
+      }
+      throw new InstallFailed(reason, fix)
+    }
+  } else if (fake) {
+    python = await findPython($)
   }
+  await startServer($, python, dir, root, fake)
+}
 
+/** Runs the first-time setup, reporting each step. */
+async function install($: EngineInterface, python: string[], dir: string, root: string, fake: boolean): Promise<void> {
+  engine.mb = 0
+  setEngine($, 'installing', 'preparing')
+  const argv = [...python, `${root}/server/setup.py`, '--cache', dir, ...(fake ? ['--fake'] : [])]
+  const it = $.process.spawn({ argv })[Symbol.asyncIterator]()
+  let lastError = ''
+  let fix = ''
+  let buffered = ''
+  for (;;) {
+    const step = await it.next()
+    if (step.done) {
+      if (step.value.code !== 0) throw new EngineError(lastError || 'the installation failed.', fix)
+      break
+    }
+    buffered += step.value.text
+    const lines = buffered.split('\n')
+    buffered = lines.pop() ?? ''
+    for (const raw of lines) {
+      const line = raw.replace(/\r$/, '') // Windows ends lines with \r\n
+      const m = /^STEP (\d+)\/(\d+) (.*)$/.exec(line)
+      if (m) {
+        engine.step = Number(m[1])
+        engine.steps = Number(m[2])
+        engine.since = Date.now()
+        engine.detail = m[3] ?? ''
+        publishStatus($)
+      } else if (line.startsWith('SIZE ')) {
+        engine.mb = Math.round(Number(line.slice(5)) / 1e6)
+        showEngine($)
+      } else if (line.startsWith('ERROR ')) lastError = line.slice(6).trim()
+      else if (line.startsWith('FIX ')) fix = line.slice(4).trim()
+    }
+  }
+}
+
+/** Starts the model server and waits for it to answer. */
+async function startServer($: EngineInterface, python: string[], dir: string, root: string, fake: boolean): Promise<void> {
   setEngine($, 'starting', '')
   const venvPython = (await isWindows($)) ? [`${dir}\\venv\\Scripts\\python.exe`] : [`${dir}/venv/bin/python`]
   const serverPython = fake ? python : venvPython
@@ -359,11 +434,12 @@ async function engineReady($: EngineInterface): Promise<void> {
  */
 async function needEngine($: EngineInterface): Promise<void> {
   if (engine.state === 'ready') return
+  if (engine.state === 'off') throw new Error('pii-mask is off')
   if (engine.state === 'installing' || engine.state === 'failed') throw new Error(blocked())
   const task = startEngine($)
   const state = (): EngineState => engine.state // read fresh: other tasks change it while this waits
   for (let waited = 0; waited < WAIT_FOR_START_MS; waited += 250) {
-    if (['ready', 'installing', 'failed'].includes(state())) break
+    if (['ready', 'installing', 'failed', 'off'].includes(state())) break
     await Promise.race([task, $.clock.sleep(250)])
   }
   if (state() !== 'ready') throw new Error(blocked())
@@ -626,6 +702,7 @@ export const register: Register = on => {
   // the hook and keep the row as it was, to be sent with every later request.
   on('session.append', async ($, e, next) => {
     await ready($)
+    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
     const before = vault.size
     const texts = textsOf(e.message.content)
     // Claude's own replies skip the model: Claude only ever sees placeholders,
@@ -643,12 +720,15 @@ export const register: Register = on => {
     await persist($, before)
     return next({ ...e, message: { ...e.message, content } })
   }).catch(($, e, next) =>
-    next.called ? next(e) : next({ ...e, message: { ...e.message, content: redactContent(e.message.content) } }),
+    next.called ? next(e)
+    : engine.state === 'off' ? next(e) // went off while this row waited for the model
+    : next({ ...e, message: { ...e.message, content: redactContent(e.message.content) } }),
   )
 
   // The session title: set from the masked prompt, so the raw prompt is never sent to title it.
   on('classic.UserPromptSubmit', async ($, e, next) => {
     await ready($)
+    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
     if (sessionFile === undefined && e.agent_id === undefined) await attach($, e.transcript_path, 'startup')
     const before = vault.size
     const result = await next(e)
@@ -656,7 +736,7 @@ export const register: Register = on => {
     const title = mask(e.prompt, await rulesFor($, [e.prompt]), vault).replace(/\s+/g, ' ').trim().slice(0, 60)
     await persist($, before)
     return { ...result, sessionTitle: title }
-  }).catch(async ($, e, next) => ({ ...(await next(e)), sessionTitle: `${NAME}: title withheld` }))
+  }).catch(async ($, e, next) => (engine.state === 'off' ? next(e) : { ...(await next(e)), sessionTitle: `${NAME}: title withheld` }))
 
   // The model's reply: unmask as it streams. While the model isn't running, or
   // the session is blocked, answer locally so nothing is sent.
@@ -740,6 +820,7 @@ export const register: Register = on => {
   // The system prompt: mask the per-session sections and explain the placeholders.
   on('prompt.compose', async ($, e, next) => {
     await ready($)
+    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
     const before = vault.size
     const { sections } = await next(e)
     const own = sections.filter(s => s.scope === 'session').map(s => s.text)
@@ -748,6 +829,7 @@ export const register: Register = on => {
     await persist($, before)
     return { sections: [...masked, { id: `${NAME}:note`, text: systemNote(vault), scope: 'session' as const }] }
   }).catch(async ($, e, next) => {
+    if (engine.state === 'off') return next(e)
     const { sections } = await next(e)
     // The note holds no personal data, so it is sent even when the sections couldn't be checked:
     // without it, Claude takes the placeholders for missing values and says so.
@@ -762,6 +844,7 @@ export const register: Register = on => {
   // CLAUDE.md and the other blocks of the first message (computed once per conversation).
   on('prompt.context', async ($, e, next) => {
     await ready($)
+    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
     const before = vault.size
     const result = await next(e)
     const rules = result.blocks.length ? await rulesFor($, result.blocks.map(b => b.text)) : []
@@ -769,6 +852,7 @@ export const register: Register = on => {
     await persist($, before)
     return { ...result, blocks }
   }).catch(async ($, e, next) => {
+    if (engine.state === 'off') return next(e)
     contextRedacted = true
     const result = await next(e)
     return { ...result, blocks: result.blocks.map(b => ({ ...b, text: UNCHECKED_NOTE })) }
@@ -777,13 +861,14 @@ export const register: Register = on => {
   // Text the engine injects on its own (mentioned files, reminders).
   on('prompt.attachment', async ($, e, next) => {
     await ready($)
+    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
     const before = vault.size
     const result = await next(e)
     if (result.text === null) return result
     const masked = { text: mask(result.text, await rulesFor($, [result.text]), vault) }
     await persist($, before)
     return masked
-  }).catch(() => ({ text: null }))
+  }).catch(($, e, next) => (engine.state === 'off' && !next.called ? next(e) : { text: null }))
 
   on('classic.SessionStart', async ($, e, next) => {
     await ready($)
@@ -819,7 +904,7 @@ export const register: Register = on => {
     // (the pane does that, on screen only), so it shows even when the model is down.
     if (arg === 'retry') {
       if (engine.state !== 'ready') setEngine($, 'unknown', '')
-      void startEngine($)
+      void startEngine($, true)
       return { text: own('Starting the local model again. The status line shows when it is ready.') }
     }
     if (arg !== '' && arg !== 'status') {
@@ -833,7 +918,9 @@ export const register: Register = on => {
     return {
       text: own(
         [
-          `${NAME}: ${blocked() ?? 'on, the local model is running.'}`,
+          `${NAME}: ${engine.state === 'off'
+            ? `off: its model is not installed (${engine.detail}). Messages go to Claude without masking. /pii-mask retry tries again.`
+            : blocked() ?? 'on, the local model is running.'}`,
           `Model: ${engine.state}${engine.detail ? ` (${engine.detail})` : ''}, GLiNER PII on ${BASE}`,
           `Model calls: ${nerStats.calls} (${nerStats.calls ? Math.round(nerStats.ms / nerStats.calls) : 0} ms on average), failed: ${nerStats.failures}`,
           `Values masked: ${vault.size} (open /pii-mask to see them) · rows removed unchecked: ${rowsRemoved} · images/PDFs removed: ${mediaDropped}`,
@@ -850,14 +937,15 @@ export const register: Register = on => {
     const view = await read($, engineAtom)
     const block = blocks.values().next().value
     const lines = engineLines(view, block)
-    if (lines.length === 0 || e.props.hasSurvey) return next(e)
+    // Off since an earlier session: the status line says so; the panel is for the session it failed in.
+    if (lines.length === 0 || e.props.hasSurvey || (view.state === 'off' && !view.fresh)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
         {lines.map(l => renderLine(Text, l))}
-        {view.state === 'failed' && !block && (
+        {(view.state === 'failed' || view.state === 'off') && !block && (
           <Box flexDirection="row" gap={2}>
-            <Button key="retry" label="Retry" onPress={() => { setEngine($, 'unknown', ''); void startEngine($) }} />
+            <Button key="retry" label="Retry" onPress={() => { setEngine($, 'unknown', ''); void startEngine($, true) }} />
             <Button key="details" label="Details" onPress={() => { void $.ui.open({ id: PANE, title: 'Masked by pii-mask' }) }} />
           </Box>
         )}
@@ -973,6 +1061,17 @@ export function engineLines(view: EngineView, block?: string): ViewLine[] {
         {
           text: `Then press Retry or type /pii-mask retry. ${waiting}` +
             (view.folder ? ` Logs: ${view.folder}/setup.log and server.log` : ''),
+          tone: 'dim',
+        },
+      ]
+    case 'off':
+      return [
+        { text: "⚠ pii-mask is off: it couldn't install its local model", tone: 'error' },
+        { text: view.detail },
+        ...(view.fix ? [{ text: `To fix it: ${view.fix}`, tone: 'fix' as const }] : []),
+        {
+          text: 'Messages go to Claude without masking until it is installed. Press Retry or type /pii-mask retry.' +
+            (view.folder ? ` Log: ${view.folder}/setup.log` : ''),
           tone: 'dim',
         },
       ]

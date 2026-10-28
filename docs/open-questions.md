@@ -8,7 +8,7 @@ Known gaps and what has not been verified yet.
 | 2 | [Misses go out as written](#2-misses-go-out-as-written) | 🟡 Patterns added in 0.3; names and addresses still rely on the model |
 | 3 | [Speed on big tool results](#3-speed-on-big-tool-results) | ❓ Not measured |
 | 4 | [Noise in code](#4-noise-in-code) | ❓ Not measured |
-| 5 | [First run blocks the session](#5-first-run-blocks-the-session) | ℹ️ By design |
+| 5 | [First run blocks the session](#5-first-run-blocks-the-session) | ℹ️ By design; off if the install fails (0.6.0) |
 | 6 | [Machines where an organization manages Claude Code](#6-machines-where-an-organization-manages-claude-code) | ⚠️ Partly covered |
 | 7 | [Gaps shared with customer-mask](#7-gaps-shared-with-customer-mask) | ⚠️ Known |
 | 8 | [Windows](#8-windows) | 🟡 Supported since 0.5.0; checked in CI, not yet on a person's machine |
@@ -57,6 +57,8 @@ NER models tag identifiers in source code as names. The shape checks drop the ob
 ### 5. First run blocks the session
 
 Installing takes minutes. A hook can't wait that long, so until the model answers, requests are answered locally and messages are removed. That is the only way to keep "nothing unchecked is sent" without asking for setup.
+
+Since 0.6.0, if the install fails, pii-mask turns itself off instead of holding every request: Claude Code then works as if it weren't installed, and the panel, a toast and the status line say so. It is only on once its model is installed. Once installed, a model that stops working still holds requests, since by then you rely on it.
 
 ### 6. Machines where an organization manages Claude Code
 

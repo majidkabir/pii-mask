@@ -117,7 +117,8 @@ A hook that throws or runs past its 10-second budget is skipped by Claude Code, 
 
 | What goes wrong | What happens |
 | --- | --- |
-| The model is installing, starting too slowly, or can't run | Requests are answered locally with the reason; rows are stored with their text removed |
+| The model is installing, starting too slowly, or (once installed) can't run | Requests are answered locally with the reason; rows are stored with their text removed |
+| The first-time install fails (no Python, a package that won't install) | pii-mask is **off**: nothing is masked or held, as if it weren't installed. The panel, a toast and the status line say so; the failure is remembered in `install-failed.json`, so new sessions don't run the same install again until `/pii-mask retry` or a new version |
 | A model call fails or takes over 7 s | That row's text is removed; the system prompt's per-session parts are replaced by a note; injected text is left out |
 | Real values can't be restored in a tool call | The call is denied, and Claude can retry it |
 | Claude Code is older than 2.1.302, or the saved table can't be read | Every request is answered locally with the reason |
