@@ -43,6 +43,7 @@ jobs:
           exit $status
 
       - name: Test the setup's choices per machine
+        if: always()
         run: python -m unittest discover -s server -v
 
       # The stand-in model: setup, starting the server detached the way the mod
@@ -50,4 +51,5 @@ jobs:
       # hang it), the API, and that a second start exits quietly.
       # real-model.yml does the same with the real model.
       - name: Smoke-test setup and server (fake model)
+        if: always()
         run: python server/smoke.py --cache "${{ runner.temp }}/pii" --fake

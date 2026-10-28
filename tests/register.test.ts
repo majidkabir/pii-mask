@@ -188,7 +188,9 @@ describe('masking with the model', () => {
     const m = markerIn(JSON.stringify(stored.message?.content))
     await $.tool.call({ tool: 'Bash', command: `echo ${ph('EMAIL', 1, m)}` } as never)
     expect(seen.ran).toBe('echo lars@holm.dk')
-    const saved = JSON.parse(seen.writes[VAULT_FILE] ?? '{}')
+    // On a Windows host the test kit hands the path over in Windows form.
+    const written = Object.keys(seen.writes).find(p => p.replace(/\\/g, '/').endsWith(VAULT_FILE.slice(1)))
+    const saved = JSON.parse((written && seen.writes[written]) ?? '{}')
     expect(saved.entries).toEqual([{ token: 'EMAIL_1', value: 'lars@holm.dk', label: 'EMAIL' }])
   })
 

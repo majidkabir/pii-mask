@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import socketserver
 import subprocess
 import sys
 import threading
@@ -167,6 +168,12 @@ def make_handler(backend, state):
 class Server(ThreadingHTTPServer):
     # On Windows, SO_REUSEADDR would let a second server take the same port.
     allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        # HTTPServer looks up the host's name (socket.getfqdn), which can take
+        # 30 s or more on some Macs; this server only ever listens on 127.0.0.1.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
 
 
 # Windows process flags: no console, its own process group, and out of the
