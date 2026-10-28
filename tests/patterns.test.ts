@@ -72,6 +72,10 @@ describe('what the patterns find', () => {
     ['iface fe80::1ff:fe23:4567:890a', 'IP', 'fe80::1ff:fe23:4567:890a'],
     ['mac 00:1A:2B:3C:4D:5E', 'MAC', '00:1A:2B:3C:4D:5E'],
     ['home is at 55.6761, 12.5683', 'LOCATION', '55.6761, 12.5683'],
+    // At the end of a sentence.
+    ["Her laptop's IP is 192.168.10.44.", 'IP', '192.168.10.44'],
+    ['She lives at 55.6761, 12.5683.', 'LOCATION', '55.6761, 12.5683'],
+    ['Her passport no. is P4829173.', 'PASSPORT', 'P4829173'],
   ]
   for (const [text, label, value] of cases) {
     test(`${label}: ${text}`, () => expect(one(text)).toEqual([label, value]))

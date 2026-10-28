@@ -153,7 +153,7 @@ export const PATTERNS: readonly PatternRule[] = [
   // Values named by the words before them
   after('date of birth', 'BIRTHDATE',
     new RegExp(`(\\b(?:date of birth|birth ?date|d\\.?o\\.?b\\.?|born(?: on)?|birthday|fødselsdato|født(?: den)?|född|geboren(?: am)?|né(?:e)? le|fecha de nacimiento)\\s*[:\\-]?\\s*)(${DATE})`, 'gi')),
-  after('passport number', 'PASSPORT', /(\b(?:passport|pasnummer|passnummer|reisepass)\s*(?:no\.?|nr\.?|number|nummer|#)?\s*[:#]?\s*)([A-Z0-9]{6,9})\b/gi, v => /\d/.test(v)),
+  after('passport number', 'PASSPORT', /(\b(?:passport|pasnummer|passnummer|reisepass)\s*(?:no\.?|nr\.?|number|nummer|#)?\s*[:#]?\s*(?:is\s+|er\s+|ist\s+|är\s+)?)([A-Z0-9]{6,9})\b/gi, v => /\d/.test(v)),
   after('account number', 'ACCOUNT',
     /(\b(?:account|acct\.?|bank account|kontonummer|kontonr\.?|konto|reg\.?\s?nr\.?)\s*(?:no\.?|nr\.?|number|#)?\s*[:#]?\s*)(\d[\d -]{4,24}\d)/gi,
     v => digitsOf(v).length >= 6),
@@ -176,9 +176,9 @@ export const PATTERNS: readonly PatternRule[] = [
   whole('IPv6 address', 'IP',
     /(?<![\w:.])(?:(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?)(?![\w:])/g,
     v => !v.includes('::') || (v.replace(/:/g, '').length >= 4 && v.split(':').filter(Boolean).length <= 7)),
-  whole('IPv4 address', 'IP', /(?<![\w.]|\bv|==\s?|@)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\w.])/g,
+  whole('IPv4 address', 'IP', /(?<![\w.]|\bv|==\s?|@)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?!\w|\.\w)/g,
     v => !/^(?:0\.0\.0\.0|127\.\d+\.\d+\.\d+|255\.255\.255\.\d+|1\.0\.0\.0)$/.test(v)),
-  whole('coordinates', 'LOCATION', /(?<![\d.])-?(?:[1-8]?\d|90)\.\d{4,},\s?-?(?:1[0-7]\d|[1-9]?\d|180)\.\d{4,}(?![\d.])/g),
+  whole('coordinates', 'LOCATION', /(?<![\d.])-?(?:[1-8]?\d|90)\.\d{4,},\s?-?(?:1[0-7]\d|[1-9]?\d|180)\.\d{4,}(?!\d|\.\d)/g),
 
   // Phone numbers, last: international (+ or 00), then common national forms
   whole('phone number', 'PHONE',
