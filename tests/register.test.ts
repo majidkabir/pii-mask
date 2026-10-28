@@ -72,11 +72,14 @@ function world(on: On, w: World = {}) {
   on('ui.render', { component: 'AssistantMessage' }, ($, e) => ({ type: 'Text', props: {}, children: [e.props.text] }) as never)
   on('ui.render', { component: 'UserMessage' }, ($, e) => ({ type: 'Text', props: {}, children: [e.props.text] }) as never)
   on('ui.render', { component: 'ToolUse' }, ($, e) => ({ type: 'Text', props: {}, children: [JSON.stringify(e.props.input)] }) as never)
-  on('fs.read', ($, e) => (files[e.path] === undefined ? { deny: `ENOENT: ${e.path}` } : { value: files[e.path] }))
-  on('fs.exists', ($, e) => ({ value: e.path in files }))
+  // On a Windows host the test kit hands paths over in Windows form (C:\\home\\u\\...): match either form.
+  const posix = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
+  const keyOf = (p: string) => Object.keys(files).find(k => posix(k) === posix(p)) ?? p
+  on('fs.read', ($, e) => (files[keyOf(e.path)] === undefined ? { deny: `ENOENT: ${e.path}` } : { value: files[keyOf(e.path)] }))
+  on('fs.exists', ($, e) => ({ value: keyOf(e.path) in files }))
   on('fs.write', ($, e) => {
     seen.writes[e.path] = e.text
-    files[e.path] = e.text
+    files[keyOf(e.path)] = e.text
     return { value: undefined }
   })
   on('fs.list', () => ({ value: [] }) as never)
