@@ -21,6 +21,7 @@ import {
   THRESHOLD,
   toolPolicy,
   UNCHECKED_NOTE,
+  unmask,
   unmaskDeep,
   Vault,
   vaultFileFor,
@@ -671,6 +672,22 @@ export const register: Register = on => {
     }
     yield* drain()
   })
+
+  // The transcript on screen: the stored rows hold placeholders, and the
+  // finished reply, the prompt and a tool call's row are drawn from them. Show
+  // the real values there; what is stored and sent stays masked. Web and MCP
+  // calls keep their placeholders on screen too, since that is what they sent.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) =>
+    next({ ...e, props: { ...e.props, text: unmask(e.props.text, vault) } }),
+  ).catch(($, e, next) => (next.called ? undefined : next(e)))
+
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) =>
+    next({ ...e, props: { ...e.props, text: unmask(e.props.text, vault) } }),
+  ).catch(($, e, next) => (next.called ? undefined : next(e)))
+
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) =>
+    next(keepsPlaceholders(e.props.tool) ? e : { ...e, props: { ...e.props, input: unmaskDeep(e.props.input, vault) } }),
+  ).catch(($, e, next) => (next.called ? undefined : next(e)))
 
   // The model's tool calls: real values back in the arguments, except for
   // tools that would send them off this machine (web tools, every MCP tool).

@@ -56,6 +56,10 @@ function world(on: On, w: World = {}) {
   on('ui.toast', () => ({ value: undefined }))
   // Claude Code's own row above the prompt, beneath pii-mask's panel.
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', props: {}, children: ['core row'] }) as never)
+  // Claude Code's transcript rows, drawn from what they are given.
+  on('ui.render', { component: 'AssistantMessage' }, ($, e) => ({ type: 'Text', props: {}, children: [e.props.text] }) as never)
+  on('ui.render', { component: 'UserMessage' }, ($, e) => ({ type: 'Text', props: {}, children: [e.props.text] }) as never)
+  on('ui.render', { component: 'ToolUse' }, ($, e) => ({ type: 'Text', props: {}, children: [JSON.stringify(e.props.input)] }) as never)
   on('fs.read', ($, e) => (files[e.path] === undefined ? { deny: `ENOENT: ${e.path}` } : { value: files[e.path] }))
   on('fs.exists', ($, e) => ({ value: e.path in files }))
   on('fs.write', ($, e) => {
@@ -201,6 +205,24 @@ describe('masking with the model', () => {
     reply.push({ kind: 'text', index: 0, text: full.slice(0, 10) }, { kind: 'text', index: 0, text: full.slice(10) })
     const chunks = await collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
     expect(textOf(chunks)).toBe('Hello Lars Holm!')
+  })
+
+  test('the finished reply, the prompt and a Bash row show real values on screen; a web search row keeps the placeholder', async ($, on) => {
+    world(on)
+    const stored = await appendPrompt($, 'Lars Holm')
+    const p = ph('PERSON', 1, markerIn(JSON.stringify(stored.message?.content)))
+    const row = async (component: string, props: object) => {
+      const ui = await $.ui.mount({ plugin: 'pii-mask', surface: 'terminal', component, props } as never)
+      const drawn = JSON.stringify(await ui.drawn())
+      await ui.unmount()
+      return drawn
+    }
+    expect(await row('AssistantMessage', { text: `Hi ${p},`, isFirstOfReply: true })).toContain('Hi Lars Holm,')
+    expect(await row('UserMessage', { text: `Write to ${p}`, origin: { kind: 'user' }, isExpanded: false })).toContain('Write to Lars Holm')
+    const bash = { tool: 'Bash', input: { command: `echo ${p}` }, isRunning: false, isErrored: false, isInterrupted: false }
+    expect(await row('ToolUse', bash)).toContain('echo Lars Holm')
+    const web = { tool: 'WebSearch', input: { query: `${p} news` }, isRunning: false, isErrored: false, isInterrupted: false }
+    expect(await row('ToolUse', web)).toContain(`${p} news`)
   })
 
   test('images are removed before they are stored or sent', async ($, on) => {

@@ -14,6 +14,7 @@ All hooks are in [`hooks/register.tsx`](../hooks/register.tsx). The masking itse
 | `prompt.attachment` | Masks text Claude Code injects (an `@file` mention, reminders); left out if that fails. |
 | `classic.UserPromptSubmit` | Titles the session from the masked prompt, so the raw prompt isn't sent to make a title. |
 | `turn.step` | Unmasks the reply as it streams, holding back a placeholder split across two pieces. While the model isn't running, answers locally with the reason instead of calling Claude. |
+| `ui.render` (AssistantMessage, UserMessage, ToolUse) | Shows real values in the finished reply, the prompt and a tool call's row. Claude Code draws those from the stored rows, which hold placeholders; only the drawing changes. `WebSearch`, `WebFetch` and MCP rows keep the placeholders they sent. |
 | `tool.call` | Restores real values in tool arguments before the permission prompt and the tool see them. `WebSearch`, `WebFetch` and every MCP tool keep their placeholders. Denies the call if restoring fails. |
 | `classic.SessionStart` | Finds the transcript; on resume, adopts the placeholder table saved beside it. |
 | `session.end` | Masks the copies Claude Code wrote to disk on its own, with every value found during the session. |
