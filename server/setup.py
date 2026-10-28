@@ -30,6 +30,9 @@ GLINER = "gliner>=0.2.16,<0.3"
 # protobuf ("DebertaV2Converter requires the protobuf library") and sentencepiece.
 # Neither is a dependency of GLiNER.
 TOKENIZER = ["protobuf", "sentencepiece"]
+# Checked with transformers 4.57 (Intel Macs, Python 3.9) and 5.16 (everywhere
+# else, Python 3.10-3.14); a major release later than that is not.
+TRANSFORMERS_CAP = "transformers<6"
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 
@@ -249,7 +252,7 @@ def main():
                 run([py, "-m", "pip", "install", "--quiet", *how["torch"]], "installing PyTorch")
 
         say("STEP 3/4 installing GLiNER")
-        run([py, "-m", "pip", "install", "--quiet", GLINER, *TOKENIZER, *how["extra"]], "installing GLiNER")
+        run([py, "-m", "pip", "install", "--quiet", GLINER, *TOKENIZER, TRANSFORMERS_CAP, *how["extra"]], "installing GLiNER")
 
         say("STEP 4/4 downloading the PII model")
         run([py, "-c", f"from gliner import GLiNER; GLiNER.from_pretrained({MODEL!r})"], "downloading the model")
