@@ -36,12 +36,16 @@ def venv_python(cache):
 
 
 def fail(msg, cache):
-    print(f"FAILED: {msg}")
+    report = [f"FAILED: {msg}"]
     for name in ("setup.log", "server.log"):
         path = os.path.join(cache, name)
         if os.path.exists(path):
-            print(f"--- last lines of {name}")
-            print("".join(open(path, encoding="utf-8", errors="replace").readlines()[-40:]))
+            report.append(f"--- last lines of {name}")
+            report += [l.rstrip() for l in open(path, encoding="utf-8", errors="replace").readlines()[-30:]]
+    print("\n".join(report))
+    if os.environ.get("GITHUB_ACTIONS"):  # an annotation, readable through the API without the log
+        text = "\n".join(report)[-6000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+        print(f"::error title=smoke test::{text}")
     sys.exit(1)
 
 
