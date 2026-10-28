@@ -106,8 +106,9 @@ const NER_CACHE_SIZE = 500
 const nerStats = { calls: 0, ms: 0, failures: 0 }
 
 function statusLine(): string {
-  const reason = blocked()
-  if (reason) return `🔒 ${NAME}: BLOCKED`
+  // A hard block (an old Claude Code). While the model installs or starts,
+  // requests are held too, but the line says what is happening.
+  if (blocks.size) return `🔒 ${NAME}: BLOCKED`
   switch (engine.state) {
     case 'ready': return `🔒 ${NAME} on`
     case 'installing': return `⏳ ${NAME}: installing its model (${engine.detail || 'first run'})`

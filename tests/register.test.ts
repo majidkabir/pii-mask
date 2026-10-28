@@ -47,7 +47,7 @@ function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
   const cache = w.windows ? WIN_CACHE : CACHE
   const files: Record<string, string> = w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }
-  const seen = { requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
+  const seen = { status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
   let up = w.up !== false
   const finds = w.finds ?? FINDS
 
@@ -56,7 +56,10 @@ function world(on: On, w: World = {}) {
   on('session.cwd', () => ({ value: '/proj' }))
   on('session.version', () => ({ value: { version: w.version ?? '2.1.302' } }))
   on('session.messages', () => ({ value: [] }))
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.status', ($, e) => {
+    seen.status.push(String((e as { text?: unknown }).text ?? ''))
+    return { value: undefined }
+  })
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   // Claude Code's own row above the prompt, beneath pii-mask's panel.
@@ -267,6 +270,9 @@ describe('the local model\'s life cycle', () => {
     expect(textOf(chunks)).toContain('installing its local model')
     expect(textOf(chunks)).toContain('installing PyTorch')
     expect(seen.requestSent).toBe(false)
+    // The status line says what is happening, not just that requests are held.
+    expect(seen.status.at(-1)).toContain('installing its model (installing PyTorch')
+    expect(seen.status.join('\n')).not.toContain('BLOCKED')
   })
 
   test('installed but not running: the mod starts the server and masks as soon as it answers', async ($, on) => {
