@@ -31,7 +31,7 @@ You don't make a list or set anything up. Two things work together, both **on yo
 
 ## Get started
 
-You need Claude Code, a Mac or Linux computer, and Python 3.9 or newer (most Macs and Linux machines already have it). On an older Mac with an Intel processor, it also needs Python 3.11 or older next to it (`brew install python@3.11`), because the AI library it uses has no newer version for those Macs.
+You need Claude Code on a Mac, Linux or Windows computer, and Python 3.9 or newer. Most Macs and Linux machines already have it; on Windows, install it with `winget install Python.Python.3.12` or from python.org. On an older Mac with an Intel processor, it also needs Python 3.11 or older next to it (`brew install python@3.11`), because the AI library it uses has no newer version for those Macs.
 
 **1. Install it.** In Claude Code, type:
 
@@ -74,11 +74,11 @@ The pane updates while you work. It's only shown on your screen and is never sen
 - **Web searches stay private too.** When Claude searches the web or uses a connected service, it sends the placeholder, not the real value.
 - **It's not perfect.** A name the model doesn't recognise goes through as written. And the rest of a sentence can still give someone away ("my sister, the only dentist in Skagen").
 - **Pictures are left out.** Screenshots and PDFs can't be checked, so they aren't sent. Claude will ask you to describe them instead.
-- **Everything stays on your computer.** The model runs locally and stops by itself when you're not using it. To remove it completely, delete the folder `~/.cache/pii-mask`.
+- **Everything stays on your computer.** The model runs locally and stops by itself when you're not using it. To remove it completely, delete the folder `~/.cache/pii-mask` (on Windows: `%LOCALAPPDATA%\pii-mask`).
 
 ## Status
 
-This is an early experiment. It was built and tested with a stand-in for the real model, so the first runs on real machines will show how fast and how accurate it is. Windows isn't supported yet.
+This is an early experiment. It was built and tested with a stand-in for the real model, so the first runs on real machines will show how fast and how accurate it is.
 
 ## More
 

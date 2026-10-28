@@ -8,6 +8,7 @@ const ph = (label: string, n: number | string, marker: string) => `<<${label}_${
 const markerIn = (text: string) => /<<[A-Z][A-Z0-9_]*_\d+(?:-\d+)?\.([a-z0-9]{4})>>/.exec(text)?.[1] ?? ''
 
 const CACHE = '/home/u/.cache/pii-mask'
+const WIN_CACHE = 'C:\\Users\\u\\AppData\\Local\\pii-mask'
 const TRANSCRIPT = '/home/u/.claude/projects/-proj/s1.jsonl'
 const VAULT_FILE = '/home/u/.claude/projects/-proj/s1.pii-mask.json'
 
@@ -31,6 +32,8 @@ type World = {
   sections?: { id: string; text: string; scope: 'shared' | 'session' }[]
   reply?: TurnStepChunk[]
   version?: string
+  /** A Windows machine: its environment, and output lines ending in \r\n. */
+  windows?: boolean
 }
 
 const FINDS: Record<string, string> = {
@@ -42,12 +45,14 @@ const FINDS: Record<string, string> = {
 /** The world beneath the plugin: files, a model server, Python, a model that streams `reply`, tools. */
 function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
-  const files: Record<string, string> = w.installed === false ? {} : { [`${CACHE}/installed.json`]: '{}' }
+  const cache = w.windows ? WIN_CACHE : CACHE
+  const files: Record<string, string> = w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }
   const seen = { requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
   let up = w.up !== false
   const finds = w.finds ?? FINDS
 
-  mock.env(on, { HOME: '/home/u' })
+  mock.env(on, w.windows ? { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u', LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' } : { HOME: '/home/u' })
+  const eol = (text: string) => (w.windows ? text.replace(/\n/g, '\r\n') : text)
   on('session.cwd', () => ({ value: '/proj' }))
   on('session.version', () => ({ value: { version: w.version ?? '2.1.302' } }))
   on('session.messages', () => ({ value: [] }))
@@ -78,13 +83,13 @@ function world(on: On, w: World = {}) {
   })
   on('process.spawn', async function* ($, e) {
     seen.spawns.push([...e.argv])
-    yield { stream: 'stdout' as const, text: 'STEP 1/4 creating a Python environment\nSTEP 2/4 installing PyTorch (the largest download)\nSIZE 412000000\n' }
+    yield { stream: 'stdout' as const, text: eol('STEP 1/4 creating a Python environment\nSTEP 2/4 installing PyTorch (the largest download)\nSIZE 412000000\n') }
     if (w.setupFails) {
-      yield { stream: 'stdout' as const, text: `${w.setupFails.fix ? `FIX ${w.setupFails.fix}\n` : ''}ERROR ${w.setupFails.reason}\n` }
+      yield { stream: 'stdout' as const, text: eol(`${w.setupFails.fix ? `FIX ${w.setupFails.fix}\n` : ''}ERROR ${w.setupFails.reason}\n`) }
       return { value: { code: 1, signal: null } } as never // a call on $ is answered with { value }
     }
     if (w.setupHangs) await clock.sleep(10_000_000)
-    files[`${CACHE}/installed.json`] = '{}'
+    files[`${cache}/installed.json`] = '{}'
     return { value: { code: 0, signal: null } } as never
   })
   const answer = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
@@ -296,6 +301,32 @@ describe('the local model\'s life cycle', () => {
     await $.prompt.compose(COMPOSE)
     await $.prompt.compose(COMPOSE)
     expect(seen.detects).toBe(1)
+  })
+
+  test('Windows: the py launcher runs the setup in %LOCALAPPDATA%, and the server runs from venv\\Scripts', async ($, on) => {
+    const { seen, clock } = world(on, { windows: true, installed: false, up: false })
+    const pending = appendPrompt($, 'Write to Lars Holm')
+    await clock.advance(7000)
+    await pending
+    expect(seen.spawns[0]?.slice(0, 2)).toEqual(['py', '-3'])
+    expect(seen.spawns[0]?.slice(3)).toEqual(['--cache', WIN_CACHE])
+    const start = seen.runs.find(r => r.some(a => a.endsWith('server/server.py')))
+    expect(start?.[0]).toBe(`${WIN_CACHE}\\venv\\Scripts\\python.exe`)
+    const stored = await appendPrompt($, 'Write to Lars Holm', 'u2')
+    expect(JSON.stringify(stored.message?.content)).toContain('PERSON_1')
+  })
+
+  test('Windows: progress with \\r\\n line ends is read', async ($, on) => {
+    const { clock } = world(on, { windows: true, installed: false, up: false, setupHangs: true })
+    const pending = appendPrompt($, 'hello')
+    await clock.advance(7000)
+    await pending
+    const ui = await $.ui.mount({ plugin: 'pii-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } as never })
+    const drawn = JSON.stringify(await ui.drawn())
+    expect(drawn).toContain('step 2 of 4: installing PyTorch')
+    expect(drawn).toContain('412 MB so far')
+    expect(drawn).not.toContain('\\r')
+    await ui.unmount()
   })
 
   test('an old Claude Code is blocked', async ($, on) => {

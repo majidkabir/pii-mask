@@ -11,7 +11,7 @@ Known gaps and what has not been verified yet.
 | 5 | [First run blocks the session](#5-first-run-blocks-the-session) | ℹ️ By design |
 | 6 | [Machines where an organization manages Claude Code](#6-machines-where-an-organization-manages-claude-code) | ⚠️ Partly covered |
 | 7 | [Gaps shared with customer-mask](#7-gaps-shared-with-customer-mask) | ⚠️ Known |
-| 8 | [Windows](#8-windows) | ❌ Not supported |
+| 8 | [Windows](#8-windows) | 🟡 Supported since 0.5.0; checked in CI, not yet on a person's machine |
 | 9 | [Intel Macs](#9-intel-macs) | 🟡 Fixed in 0.4.2 (Python 3.11, protobuf), not yet confirmed on one |
 
 ### 1. The real model hasn't run with the mod
@@ -55,7 +55,9 @@ There, Claude Code's built-in guard runs before plugins a person installs, and s
 
 ### 8. Windows
 
-The server detaches with `fork`, and the setup expects `venv/bin/python`. Both are macOS and Linux only; on Windows the mod blocks with a message.
+Since 0.5.0. On Windows the mod finds Python through the launcher (`py -3`) first, since `python` there may be the Microsoft Store stub; installs into `%LOCALAPPDATA%\pii-mask` with `venv\Scripts\python.exe`; reads the setup's progress with `\r\n` line ends; and the server detaches by starting itself again as a detached process (no `fork` on Windows), out of the session's job when it may. On Windows the server also refuses to share its port (`SO_REUSEADDR` would let a second one bind it). PyTorch's Windows build needs the Visual C++ runtime; when it's missing, the setup names `winget install Microsoft.VCRedist.2015+.x64` as the fix.
+
+Checked on GitHub's Windows machines: the mod's tests, the setup's tests, a smoke test that starts the server the way the mod does (output captured, so a server holding the caller's pipes would hang it), and [real-model.yml](../.github/workflows/real-model.yml), which installs the real model and checks that it finds a name, on Windows, Linux, Apple silicon and an Intel Mac. Not yet run on a person's Windows machine with Claude Code.
 
 ### 9. Intel Macs
 

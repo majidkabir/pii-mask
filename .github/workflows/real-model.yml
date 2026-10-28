@@ -1,0 +1,33 @@
+name: real model
+
+# Installs PyTorch, GLiNER and the real PII model with server/setup.py, starts
+# the server detached and checks that it finds a name. Takes several minutes
+# and downloads about 2 GB per machine, so it runs when the server changes,
+# weekly (new package releases), or by hand.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+  push:
+    branches: [main]
+    paths: ['server/**', '.github/workflows/real-model.yml']
+
+jobs:
+  model:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: '3.12' }
+          - { os: windows-latest, python: '3.12' }
+          - { os: macos-latest, python: '3.12' }     # Apple silicon
+          - { os: macos-15-intel, python: '3.11' }   # Intel: PyTorch 2.2.2, Python 3.11 or older
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install, start and ask the real model
+        run: python server/smoke.py --cache "${{ runner.temp }}/pii" --start-limit 600

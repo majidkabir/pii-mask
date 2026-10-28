@@ -6,6 +6,7 @@ machine shares it. It listens on 127.0.0.1 only, logs nothing it is sent, and
 stops by itself after 30 minutes without requests.
 
     <cache>/venv/bin/python server/server.py --cache ~/.cache/pii-mask [--daemon]
+    (Windows: <cache>\\venv\\Scripts\\python.exe, cache %LOCALAPPDATA%\\pii-mask)
 
 API (JSON):
     GET  /health  -> {"app": "pii-mask", "ok": true, "model": ...}
@@ -17,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -162,6 +164,37 @@ def make_handler(backend, state):
     return Handler
 
 
+class Server(ThreadingHTTPServer):
+    # On Windows, SO_REUSEADDR would let a second server take the same port.
+    allow_reuse_address = os.name != "nt"
+
+
+# Windows process flags: no console, its own process group, and out of the
+# caller's job, so it keeps running when the session that started it ends.
+DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def detach_windows(args, cache):
+    """Windows has no fork: start this script again as a detached process
+    (without --daemon) writing to server.log, and return at once."""
+    argv = [sys.executable, os.path.abspath(__file__), "--cache", cache, "--port", str(args.port), "--idle", str(args.idle)]
+    if args.fake:
+        argv.append("--fake")
+    log = open(os.path.join(cache, "server.log"), "ab")
+    flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    try:
+        try:
+            subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                             close_fds=True, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB)
+        except OSError:  # the job doesn't allow breaking away
+            subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                             close_fds=True, creationflags=flags)
+    finally:
+        log.close()
+
+
 def daemonize(log_path):
     """Detaches from the mod: the call that started it returns at once, and the
     server keeps running when that session ends."""
@@ -191,9 +224,13 @@ def main():
     # Bind first, so a second start (another session, same moment) exits quietly.
     state = {"last": time.time()}
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), BaseHTTPRequestHandler)
+        server = Server(("127.0.0.1", args.port), BaseHTTPRequestHandler)
     except OSError:
         print(f"pii-mask: port {args.port} is in use; another server is probably running", file=sys.stderr)
+        return 0
+    if args.daemon and os.name == "nt":
+        server.server_close()  # the detached copy binds it again
+        detach_windows(args, cache)
         return 0
     if args.daemon:
         daemonize(os.path.join(cache, "server.log"))

@@ -67,7 +67,7 @@ GLiNER could not load the tokenizer.""".splitlines()
         msg = error_in(log)
         self.assertIn("DebertaV2Converter requires the protobuf library", msg)
         self.assertIn("(then: ImportError: GLiNER could not load the tokenizer.)", msg)
-        self.assertEqual(fix_for(msg, "Darwin"), "~/.cache/pii-mask/venv/bin/pip install protobuf, then /pii-mask retry")
+        self.assertEqual(fix_for(msg, "Darwin", "/c/venv/bin/python"), "/c/venv/bin/python -m pip install protobuf, then /pii-mask retry")
 
     def test_tokenizer_libraries_are_installed(self):
         from setup import TOKENIZER

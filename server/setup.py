@@ -6,6 +6,7 @@ build where there is one) and GLiNER into it, and downloads the PII model.
 Everything stays in that folder; delete it to start over.
 
     python3 server/setup.py --cache ~/.cache/pii-mask
+    py -3 server\\setup.py --cache %LOCALAPPDATA%\\pii-mask      (Windows)
 
 Prints, for the mod to show: "STEP 2/4 <what>" at each step, "SIZE <bytes>"
 every few seconds (what has been downloaded and installed so far), and on
@@ -122,18 +123,24 @@ def re_exception(line):
     return head.endswith(("Error", "Exception")) and " " not in head
 
 
-def fix_for(reason, system):
-    """A command that fixes a known failure, or None."""
+def fix_for(reason, system, py="python"):
+    """A command that fixes a known failure, or None. `py` is the environment's Python."""
     r = reason.lower()
-    if "ensurepip" in r or "venv" in r and system == "Linux":
+    if ("ensurepip" in r or "venv" in r) and system == "Linux":
         return "sudo apt install python3-venv"
+    if system == "Windows" and ("winerror 126" in r or "c10.dll" in r or "fbgemm.dll" in r or "vcruntime" in r):
+        # PyTorch's DLLs need the Visual C++ runtime.
+        return "winget install Microsoft.VCRedist.2015+.x64, then /pii-mask retry"
+    if system == "Windows" and "long path" in r:
+        return ("as administrator: reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem "
+                "/v LongPathsEnabled /t REG_DWORD /d 1 /f, then /pii-mask retry")
     if "dynamo is not supported on python 3.12" in r:
         return "install Python 3.11 (brew install python@3.11), then /pii-mask retry"
     if "no matching distribution found for torch" in r:
         return "install Python 3.11 (brew install python@3.11, or your package manager), then /pii-mask retry"
     missing = re.search(r"requires the (\w[\w.-]*) library", reason)
     if missing:
-        return f"~/.cache/pii-mask/venv/bin/pip install {missing.group(1)}, then /pii-mask retry"
+        return f"{py} -m pip install {missing.group(1)}, then /pii-mask retry"
     if "no space left" in r:
         return "free some disk space (about 3 GB), then /pii-mask retry"
     if "connection" in r or "timed out" in r or "temporary failure in name resolution" in r:
@@ -164,6 +171,12 @@ def pick_python(python_max, which=shutil.which, current=None):
         if found:
             return found
     return None
+
+
+def venv_python(venv):
+    if os.name == "nt":
+        return os.path.join(venv, "Scripts", "python.exe")
+    return os.path.join(venv, "bin", "python")
 
 
 def venv_version(py):
@@ -200,12 +213,13 @@ def main():
     log.write(f"\n--- setup {time.strftime('%Y-%m-%d %H:%M:%S')} on {platform.platform()}, Python {platform.python_version()}\n")
     log.flush()
     venv = os.path.join(cache, "venv")
-    py = os.path.join(venv, "bin", "python")
+    py = venv_python(venv)
 
     # Downloads go through a temporary folder inside the cache, so its size shows progress.
     tmp = os.path.join(cache, "tmp")
     os.makedirs(tmp, exist_ok=True)
-    base_env = dict(os.environ, TMPDIR=tmp, PIP_PROGRESS_BAR="off", HF_HOME=os.path.join(cache, "hf"))
+    base_env = dict(os.environ, TMPDIR=tmp, TMP=tmp, TEMP=tmp, PIP_PROGRESS_BAR="off", PYTHONUTF8="1",
+                    HF_HOME=os.path.join(cache, "hf"), HF_HUB_DISABLE_SYMLINKS_WARNING="1")
 
     def run(cmd, what):
         log.write("$ " + " ".join(cmd) + "\n")
@@ -258,7 +272,7 @@ def main():
         run([py, "-c", f"from gliner import GLiNER; GLiNER.from_pretrained({MODEL!r})"], "downloading the model")
     except RuntimeError as err:
         stop.set()
-        fix = fix_for(str(err), platform.system())
+        fix = fix_for(str(err), platform.system(), py)
         if fix:
             say(f"FIX {fix}")
         say(f"ERROR {err}")

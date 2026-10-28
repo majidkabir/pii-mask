@@ -222,21 +222,41 @@ async function serverUp($: EngineInterface): Promise<boolean> {
   }
 }
 
+async function isWindows($: EngineInterface): Promise<boolean> {
+  return (await $.env.get('OS')) === 'Windows_NT'
+}
+
 async function cacheDir($: EngineInterface): Promise<string> {
+  if (await isWindows($)) {
+    const local = (await $.env.get('LOCALAPPDATA')) || `${await $.env.get('USERPROFILE')}\\AppData\\Local`
+    return `${local}\\pii-mask`
+  }
   const xdg = await $.env.get('XDG_CACHE_HOME')
   const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
   return `${xdg || `${home}/.cache`}/pii-mask`
 }
 
-/** A Python 3.9 or newer on the PATH. */
-async function findPython($: EngineInterface): Promise<string> {
-  for (const exe of ['python3', 'python']) {
+/**
+ * A Python 3.9 or newer on the PATH, as the command that runs it. On Windows
+ * the launcher (`py -3`) comes first: `python` there may be the Microsoft Store
+ * stub, which only opens the Store.
+ */
+async function findPython($: EngineInterface): Promise<string[]> {
+  const windows = await isWindows($)
+  const candidates = windows ? [['py', '-3'], ['python'], ['python3']] : [['python3'], ['python']]
+  for (const exe of candidates) {
     try {
-      const r = await $.process.run([exe, '-c', 'import sys; print(sys.version_info >= (3, 9))'], { timeoutMs: 10_000 })
+      const r = await $.process.run([...exe, '-c', 'import sys; print(sys.version_info >= (3, 9))'], { timeoutMs: 10_000 })
       if (r.exitCode === 0 && r.stdout.trim() === 'True') return exe
     } catch {
       // not on the PATH
     }
+  }
+  if (windows) {
+    throw new EngineError(
+      'Python 3.9 or newer is needed, and none was found.',
+      'winget install Python.Python.3.12 (or install it from python.org), then /pii-mask retry',
+    )
   }
   let mac = false
   try {
@@ -262,9 +282,6 @@ function startEngine($: EngineInterface): Promise<void> {
 
 async function runEngine($: EngineInterface): Promise<void> {
   if (await serverUp($)) return engineReady($)
-  if ((await $.env.get('OS')) === 'Windows_NT') {
-    throw new EngineError('Windows is not supported yet; the model server runs on macOS and Linux.', 'disable pii-mask on this machine (/plugin)')
-  }
   const dir = await cacheDir($)
   engine.cache = dir
   const fake = (await $.env.get('PII_MASK_FAKE_MODEL')) === '1'
@@ -274,7 +291,7 @@ async function runEngine($: EngineInterface): Promise<void> {
   if (!(await $.fs.exists(`${dir}/installed.json`))) {
     engine.mb = 0
     setEngine($, 'installing', 'preparing')
-    const argv = [python, `${root}/server/setup.py`, '--cache', dir, ...(fake ? ['--fake'] : [])]
+    const argv = [...python, `${root}/server/setup.py`, '--cache', dir, ...(fake ? ['--fake'] : [])]
     const it = $.process.spawn({ argv })[Symbol.asyncIterator]()
     let lastError = ''
     let fix = ''
@@ -288,7 +305,8 @@ async function runEngine($: EngineInterface): Promise<void> {
       buffered += step.value.text
       const lines = buffered.split('\n')
       buffered = lines.pop() ?? ''
-      for (const line of lines) {
+      for (const raw of lines) {
+        const line = raw.replace(/\r$/, '') // Windows ends lines with \r\n
         const m = /^STEP (\d+)\/(\d+) (.*)$/.exec(line)
         if (m) {
           engine.step = Number(m[1])
@@ -306,9 +324,10 @@ async function runEngine($: EngineInterface): Promise<void> {
   }
 
   setEngine($, 'starting', '')
-  const serverPython = fake ? python : `${dir}/venv/bin/python`
+  const venvPython = (await isWindows($)) ? [`${dir}\\venv\\Scripts\\python.exe`] : [`${dir}/venv/bin/python`]
+  const serverPython = fake ? python : venvPython
   await $.process.run(
-    [serverPython, `${root}/server/server.py`, '--daemon', '--port', String(PORT), '--cache', dir, ...(fake ? ['--fake'] : [])],
+    [...serverPython, `${root}/server/server.py`, '--daemon', '--port', String(PORT), '--cache', dir, ...(fake ? ['--fake'] : [])],
     { timeoutMs: 30_000 },
   )
   for (let waited = 0; waited < START_LIMIT_MS; waited += 1000) {

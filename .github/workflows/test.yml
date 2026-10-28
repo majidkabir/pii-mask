@@ -7,7 +7,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,16 +35,11 @@ jobs:
         run: claude plugin test .
 
       - name: Test the setup's choices per machine
-        run: python3 -m unittest discover -s server -v
+        run: python -m unittest discover -s server -v
 
-      # The real model is not downloaded in CI; the server's fake mode checks
-      # setup, start-up, the API and that a second start exits quietly.
-      - name: Smoke-test the model server (fake mode)
-        run: |
-          python3 server/setup.py --cache "$RUNNER_TEMP/pii" --fake
-          python3 server/server.py --cache "$RUNNER_TEMP/pii" --daemon --fake
-          for i in 1 2 3 4 5 6 7 8 9 10; do curl -sf 127.0.0.1:8766/health && break; sleep 1; done
-          curl -sf -X POST 127.0.0.1:8766/detect \
-            -d '{"texts":["Mail Anna Berg at anna@berg.se"],"labels":["person","email"]}' | tee out.json
-          grep -q '"Anna Berg"' out.json && grep -q '"anna@berg.se"' out.json
-          python3 server/server.py --cache "$RUNNER_TEMP/pii" --daemon --fake
+      # The stand-in model: setup, starting the server detached the way the mod
+      # does (output captured, so a server holding the caller's pipes would
+      # hang it), the API, and that a second start exits quietly.
+      # real-model.yml does the same with the real model.
+      - name: Smoke-test setup and server (fake model)
+        run: python server/smoke.py --cache "${{ runner.temp }}/pii" --fake

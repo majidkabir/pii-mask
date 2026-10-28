@@ -46,6 +46,9 @@ CI runs the server in fake mode as a smoke test.
 ```bash
 python3 server/setup.py --cache ~/.cache/pii-mask
 ~/.cache/pii-mask/venv/bin/python server/server.py --cache ~/.cache/pii-mask
+
+# end to end, the way the mod runs it (any OS; drop --fake for the real model)
+python server/smoke.py --cache /tmp/pii --fake
 curl -s -X POST 127.0.0.1:8766/detect \
   -d '{"texts":["Call Anna Berg on +46 70 12 34 56"],"labels":["person","phone number"],"threshold":0.5}'
 ```
