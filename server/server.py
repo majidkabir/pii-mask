@@ -15,6 +15,8 @@ API (JSON):
 """
 
 import argparse
+import heapq
+import itertools
 import json
 import os
 import re
@@ -27,6 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODEL = "urchade/gliner_multi_pii-v1"
 MAX_BODY = 16 * 1024 * 1024
+BATCH = 4  # chunks per model call; between calls a smaller waiting request goes first
+CACHE_SIZE = 20000  # chunks whose results are kept
 CHUNK = 1000  # characters per model input; GLiNER reads about 384 words at a time
 LINE_NUMBER = re.compile(r"[ \t]*\d+\t")
 
@@ -71,24 +75,11 @@ class Gliner:
         self.name = MODEL
         self.model = GLiNER.from_pretrained(MODEL)
 
-    def detect(self, texts, labels, threshold):
-        parts = [(i, off, chunk) for i, t in enumerate(texts) for off, chunk in pieces(t) if chunk.strip()]
-        results = [[] for _ in texts]
-        if not parts:
-            return results
-        chunks = [c for _, _, c in parts]
+    def predict(self, chunks, labels, threshold):
         run = getattr(self.model, "inference", None) or getattr(self.model, "batch_predict_entities", None)
-        found = run(chunks, labels, threshold=threshold) if run else [
-            self.model.predict_entities(c, labels, threshold=threshold) for c in chunks
-        ]
-        for (i, off, _), ents in zip(parts, found):
-            for e in ents:
-                results[i].append({
-                    "text": e["text"], "label": e["label"],
-                    "start": e["start"] + off, "end": e["end"] + off,
-                    "score": round(float(e["score"]), 3),
-                })
-        return results
+        if run:
+            return run(chunks, labels, threshold=threshold)
+        return [self.model.predict_entities(c, labels, threshold=threshold) for c in chunks]
 
 
 class Fake:
@@ -105,7 +96,7 @@ class Fake:
     def __init__(self, cache):
         self.name = "fake (tests only)"
 
-    def detect(self, texts, labels, threshold):
+    def predict(self, texts, labels, threshold):
         results = []
         for t in texts:
             found = []
@@ -120,8 +111,71 @@ class Fake:
         return results
 
 
+class Gate:
+    """One model call at a time. Of the requests waiting, the one with the
+    fewest chunks left goes next, so a prompt isn't stuck behind a long file."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.busy = False
+        self.waiting = []
+        self.seq = itertools.count()
+
+    def run(self, size, fn):
+        key = (size, next(self.seq))
+        with self.cond:
+            heapq.heappush(self.waiting, key)
+            while self.busy or self.waiting[0] != key:
+                self.cond.wait()
+            heapq.heappop(self.waiting)
+            self.busy = True
+        try:
+            return fn()
+        finally:
+            with self.cond:
+                self.busy = False
+                self.cond.notify_all()
+
+
+class Detector:
+    """Splits texts into chunks, answers the chunks it has seen before from a
+    cache (Claude Code sends the same system prompt and reminders every
+    turn), and runs the rest through the model, a few chunks at a time."""
+
+    def __init__(self, backend):
+        self.backend = backend
+        self.name = backend.name
+        self.gate = Gate()
+        self.cache = {}
+        self.cache_lock = threading.Lock()
+
+    def detect(self, texts, labels, threshold):
+        parts = [(i, off, chunk) for i, t in enumerate(texts) for off, chunk in pieces(t) if chunk.strip()]
+        key = (tuple(labels), threshold)
+        with self.cache_lock:
+            found = {c: self.cache.get((key, c)) for _, _, c in parts}
+        todo = list(dict.fromkeys(c for c, ents in found.items() if ents is None))
+        for n in range(0, len(todo), BATCH):
+            batch = todo[n:n + BATCH]
+            ents = self.gate.run(len(todo) - n, lambda: self.backend.predict(batch, labels, threshold))
+            with self.cache_lock:
+                for c, e in zip(batch, ents):
+                    found[c] = e
+                    if len(self.cache) >= CACHE_SIZE:
+                        self.cache.pop(next(iter(self.cache)))
+                    self.cache[(key, c)] = e
+        results = [[] for _ in texts]
+        for i, off, c in parts:
+            for e in found[c]:
+                results[i].append({
+                    "text": e["text"], "label": e["label"],
+                    "start": e["start"] + off, "end": e["end"] + off,
+                    "score": round(float(e["score"]), 3),
+                })
+        return results
+
+
 def make_handler(backend, state):
-    lock = threading.Lock()  # one model call at a time
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # never log what was sent
@@ -157,8 +211,7 @@ def make_handler(backend, state):
                     raise ValueError("texts must be a list of strings")
             except (ValueError, KeyError, TypeError) as err:
                 return self.answer(400, {"error": str(err)})
-            with lock:
-                results = backend.detect(texts, labels, threshold)
+            results = backend.detect(texts, labels, threshold)
             state["last"] = time.time()
             self.answer(200, {"results": results})
 
@@ -243,7 +296,7 @@ def main():
         daemonize(os.path.join(cache, "server.log"))
 
     started = time.time()
-    backend = Fake(cache) if args.fake else Gliner(cache)
+    backend = Detector(Fake(cache) if args.fake else Gliner(cache))
     backend.detect(["Warm-up: Anna Berg, anna@example.com."], ["person", "email"], 0.5)
     server.RequestHandlerClass = make_handler(backend, state)
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pii-mask model server: {backend.name} ready in "

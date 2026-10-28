@@ -56,6 +56,15 @@ describe('finds', () => {
     expect(looksLikeName("O'Brien")).toBe(true)
     expect(looksLikeName('NerSettings')).toBe(false)
     expect(looksLikeName('x = 1')).toBe(false)
+    // Pronouns, greetings and roles the model sometimes tags as people.
+    for (const w of ['We', 'You', 'Your name', 'Dear', 'Hi', 'Vi', 'Kære', 'Wir']) expect([w, looksLikeName(w)]).toEqual([w, false])
+    expect(looksLikeName('Sofie')).toBe(true)
+    expect(looksLikeName('Dear Sofie')).toBe(true)
+  })
+
+  test('an address needs a number', () => {
+    expect(nerFinds([{ text: 'home address', label: 'address' }, { text: 'Your home address', label: 'address' }, { text: 'Hellerup', label: 'address' }])).toEqual([])
+    expect(nerFinds([{ text: 'Strandvejen 112, 2900 Hellerup', label: 'address' }])).toHaveLength(1)
   })
 })
 

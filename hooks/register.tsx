@@ -627,7 +627,12 @@ export const register: Register = on => {
     await ready($)
     const before = vault.size
     const texts = textsOf(e.message.content)
-    const rules = !texts.length ? [] : isOwnRow(texts) ? [...PATTERNS, ...findRules([], vault)] : await rulesFor($, texts)
+    // Claude's own replies skip the model: Claude only ever sees placeholders,
+    // so what it writes holds no personal data it wasn't given, and the model
+    // would only add false finds ("We") and delay. Patterns and every value
+    // found so far still apply.
+    const reply = (e.message as { role?: string }).role === 'assistant'
+    const rules = !texts.length ? [] : reply || isOwnRow(texts) ? [...PATTERNS, ...findRules([], vault)] : await rulesFor($, texts)
     const content = maskContent(e.message.content, rules)
     await persist($, before)
     return next({ ...e, message: { ...e.message, content } })
@@ -677,7 +682,16 @@ export const register: Register = on => {
       }
       return out
     }
-    for await (const chunk of next(e)) {
+    const stream = next(e)[Symbol.asyncIterator]()
+    for (;;) {
+      const step = await stream.next()
+      if (step.done) {
+        yield* drain()
+        // The step's answer as a whole (what `claude -p` prints) is unmasked too.
+        const result = step.value
+        return result && typeof result.answer === 'string' ? { ...result, answer: unmask(result.answer, vault) } : result
+      }
+      const chunk = step.value
       if (chunk.kind === 'text' || chunk.kind === 'thinking') {
         const key = `${chunk.kind}:${chunk.index}`
         yield* drain(key)
@@ -690,7 +704,6 @@ export const register: Register = on => {
       yield* drain()
       yield chunk
     }
-    yield* drain()
   })
 
   // The transcript on screen: the stored rows hold placeholders, and the
@@ -730,7 +743,14 @@ export const register: Register = on => {
     return { sections: [...masked, { id: `${NAME}:note`, text: systemNote(vault), scope: 'session' as const }] }
   }).catch(async ($, e, next) => {
     const { sections } = await next(e)
-    return { sections: sections.map(s => (s.scope === 'session' ? { ...s, text: UNCHECKED_NOTE } : s)) }
+    // The note holds no personal data, so it is sent even when the sections couldn't be checked:
+    // without it, Claude takes the placeholders for missing values and says so.
+    return {
+      sections: [
+        ...sections.map(s => (s.scope === 'session' ? { ...s, text: UNCHECKED_NOTE } : s)),
+        { id: `${NAME}:note`, text: systemNote(vault), scope: 'session' as const },
+      ],
+    }
   })
 
   // CLAUDE.md and the other blocks of the first message (computed once per conversation).

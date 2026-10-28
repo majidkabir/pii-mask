@@ -40,7 +40,15 @@ Patterns can also be wrong the other way: a passphrase made only of letters (`co
 
 ### 3. Speed on big tool results
 
-A model call may take 7 seconds; a row whose call takes longer is removed. GLiNER on a CPU is much slower than spaCy, so large file reads and long command output may often be removed rather than masked. Measure on a real machine: per prompt, per 10 KB and per 100 KB.
+The model takes about 0.8 s per 1,000 characters on a 2-core machine (measured in a cloud container; the GitHub machines in #1 are faster). A call may take 7 seconds; content whose call takes longer is removed, not sent.
+
+What keeps that rare since 0.5.2:
+- **Cache.** The server keeps the model's answer per chunk of about 1,000 characters. Claude Code sends the same system prompt and reminders every turn, so after the first turn only new text goes through the model. In a test, hooks that ran out of time went from 4 in the first run to 0 in the third.
+- **Small first.** The server runs the model a few chunks at a time, and between those the request with the least left goes next, so a prompt isn't stuck behind a long file.
+- **Claude's replies skip the model.** Claude only sees placeholders, so its replies get the patterns and every value found so far, without the model.
+- **The note is always sent.** If the system prompt can't be checked in time, its sections are removed but the note about placeholders is still added, so Claude doesn't take placeholders for missing values.
+
+Still to measure on slow machines (an Intel Mac from 2015): long file reads and command output, which can still be removed when the model is slower than the limit.
 
 ### 4. Noise in code
 
@@ -56,7 +64,7 @@ There, Claude Code's built-in guard runs before plugins a person installs, and s
 
 ### 7. Gaps shared with customer-mask
 
-- In headless runs (`claude -p`, the SDK), Claude Code titles the session from the raw first prompt before any hook runs.
+- In headless runs (`claude -p`, the SDK), Claude Code titles the session from the raw first prompt before any hook runs, and the printed answer keeps its placeholders: it is taken from the stored reply, which no hook can change for printing. Files written and commands run get the real values as usual.
 - `claude --safe-mode` and `--bare` start without any mods.
 - Bash gets real values; a command that sends data somewhere itself (`curl` to an outside API) sends them too.
 - Masking hides values, not context: a job title, a town or a story can still identify a person.

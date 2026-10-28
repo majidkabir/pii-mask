@@ -47,7 +47,7 @@ function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
   const cache = w.windows ? WIN_CACHE : CACHE
   const files: Record<string, string> = w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }
-  const seen = { status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
+  const seen = { answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
   let up = w.up !== false
   const finds = w.finds ?? FINDS
 
@@ -115,7 +115,7 @@ function world(on: On, w: World = {}) {
   on('turn.step', async function* () {
     seen.requestSent = true
     for (const c of w.reply ?? []) yield c
-    return { turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
+    return { turnId: 't', index: 0, answer: seen.answer, toolUses: [], stopReason: 'end_turn', usage: null }
   })
   on('tool.call', ($, e) => {
     if (e.tool === 'Bash') seen.ran = e.command
@@ -217,6 +217,17 @@ describe('masking with the model', () => {
     expect(textOf(chunks)).toBe('Hello Lars Holm!')
   })
 
+  test('the step\'s whole answer (what claude -p prints) is unmasked too', async ($, on) => {
+    const { seen } = world(on)
+    const stored = await appendPrompt($, 'Lars Holm')
+    const m = markerIn(JSON.stringify(stored.message?.content))
+    seen.answer = `Hello ${ph('PERSON', 1, m)}!`
+    const it = $.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 })[Symbol.asyncIterator]()
+    let step = await it.next()
+    while (!step.done) step = await it.next()
+    expect((step.value as { answer: string }).answer).toBe('Hello Lars Holm!')
+  })
+
   test('the finished reply, the prompt and a Bash row show real values on screen; a web search row keeps the placeholder', async ($, on) => {
     world(on)
     const stored = await appendPrompt($, 'Lars Holm')
@@ -302,6 +313,31 @@ describe('the local model\'s life cycle', () => {
     const text = JSON.stringify((await pending).message?.content)
     expect(text).not.toContain('Lars')
     expect(text).toContain('could not check this content')
+  })
+
+  test('Claude\'s reply skips the model but still gets every value found so far', async ($, on) => {
+    const { seen } = world(on, { finds: { 'Lars Holm': 'person', We: 'person' } })
+    await appendPrompt($, 'Write to Lars Holm')
+    const before = seen.detects
+    const stored = await $.session.append({
+      message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'We wrote to Lars Holm.' }] },
+      door: 'response',
+      origin: { kind: 'model' },
+      uuid: 'a1',
+    } as never)
+    const text = JSON.stringify(stored.message?.content)
+    expect(seen.detects).toBe(before)
+    expect(text).not.toContain('Lars')
+    expect(text).toContain('We wrote to')
+  })
+
+  test('when the system prompt can\'t be checked in time, its sections are removed but the note is still sent', async ($, on) => {
+    const { clock } = world(on, { slowMs: 9000, sections: [{ id: 'env', text: 'Working on Lars Holm\'s laptop', scope: 'session' }] })
+    const pending = $.prompt.compose(COMPOSE)
+    await clock.advance(10_000)
+    const { sections } = await pending
+    expect(JSON.stringify(sections)).not.toContain('Lars')
+    expect(sections.at(-1)?.id).toBe('pii-mask:note')
   })
 
   test('the same text is sent to the model once', async ($, on) => {

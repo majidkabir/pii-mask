@@ -102,8 +102,24 @@ const exactKey = (v: string) => v.toLowerCase().replace(/\s+/g, ' ')
  * for one: letters, digits, spaces and . , & ' ’ / - only, starting with a
  * capital, and no word in camelCase or snake_case ("onMatch", "RAW_FIELDS").
  */
+/**
+ * Words that are never a name on their own: pronouns, greetings, roles. The
+ * model sometimes tags "We" or "Your name" as a person; a value found once is
+ * masked everywhere after, so one such find would hide "we" all session.
+ */
+const NOT_NAMES = new Set(
+  ('i me my mine we us our ours you your yours he him his she her hers they them their theirs it its ' +
+    'the a an and or of to name names client clients customer customers user users team sir madam dear ' +
+    'hi hello hey regards thanks mr mrs ms miss dr prof ' +
+    'jeg mig min mit mine vi os vores du dig din dit dine han hun hans hendes de dem deres kære hej kunde ' +
+    'jag mitt oss vår våra dina hon henne kund hei meg deg ' +
+    'ich mich mein meine wir uns unser sie ihr ihre er ihn sein liebe lieber hallo herr frau')
+    .split(' '),
+)
+
 export function looksLikeName(value: string): boolean {
   if (!/^\p{Lu}/u.test(value)) return false
+  if (value.split(/[\s.,]+/).filter(Boolean).every(w => NOT_NAMES.has(w.toLowerCase()))) return false
   if (/[^\p{L}\p{M}\p{N} .,&'’/-]/u.test(value) || value.includes('&&')) return false
   return value.split(/[\s/-]+/).every(w => !/\p{Ll}\p{Lu}/u.test(w))
 }
@@ -116,7 +132,8 @@ const digits = (v: string) => v.replace(/\D/g, '').length
  */
 const SHAPE: Record<string, (v: string) => boolean> = {
   PERSON: looksLikeName,
-  ADDRESS: v => /\p{L}/u.test(v) && v.length >= 5 && !/[^\p{L}\p{M}\p{N} .,'’/#-]/u.test(v),
+  // A street address has a number; "home address" or a town alone is not one.
+  ADDRESS: v => /\p{L}/u.test(v) && /\d/.test(v) && v.length >= 5 && !/[^\p{L}\p{M}\p{N} .,'’/#-]/u.test(v),
   EMAIL: v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v),
   PHONE: v => digits(v) >= 6 && !/[^\d\s+().-]/.test(v),
   IBAN: v => /^[A-Za-z]{2}\d{2}/.test(v.replace(/\s/g, '')) && digits(v) >= 8,
@@ -434,7 +451,9 @@ export function systemNote(vault: Vault): string {
     `A placeholder with a -2, -3 ... after its number, such as ${vault.format('PERSON_1-2')}, is another spelling of the same value. ` +
     'Use a placeholder exactly as written, including the part after the dot, wherever its real value belongs ' +
     '(prose, code, commands, file edits): it is restored automatically before any tool runs and before the user ' +
-    'reads your reply. Never guess, reconstruct or invent the real values, and do not comment on the placeholders unless asked.'
+    'reads your reply. The user sees the real values on screen and in every file you write, so from their side ' +
+    'nothing is masked: write as if each placeholder were its real value, and do not mention placeholders, masking ' +
+    'or missing values, or ask the user to fill them in, unless they ask about it. Never guess, reconstruct or invent the real values.'
   )
 }
 
