@@ -4,7 +4,7 @@ Known gaps and what has not been verified yet.
 
 | # | Topic | Status |
 | --- | --- | --- |
-| 1 | [The real model hasn't run with the mod](#1-the-real-model-hasnt-run-with-the-mod) | ⚠️ Not verified |
+| 1 | [The real model hasn't run with the mod](#1-the-real-model-hasnt-run-with-the-mod) | 🟡 Setup and model checked in CI on 4 machines; accuracy not measured |
 | 2 | [Misses go out as written](#2-misses-go-out-as-written) | 🟡 Patterns added in 0.3; names and addresses still rely on the model |
 | 3 | [Speed on big tool results](#3-speed-on-big-tool-results) | ❓ Not measured |
 | 4 | [Noise in code](#4-noise-in-code) | ❓ Not measured |
@@ -21,7 +21,16 @@ The machine pii-mask was built on could not reach Hugging Face, so GLiNER was ne
 - 93 automated tests of the masking, the built-in patterns (with true positives and ordinary text that must stay untouched), every hook and the pane, including first-run setup, starting the server, a slow model and a missing Python.
 - Real Claude Code 2.1.302 sessions: on first use the mod ran the setup and started the server by itself; a CSV of names, emails and phone numbers, and a prompt with a name and a phone number, reached the model as placeholders only; files Claude wrote through Bash got the real values.
 
-Still to verify on a real machine: that `setup.py` installs PyTorch and GLiNER and downloads the model, that the model loads within the 3-minute limit, and how well it finds what it should.
+Since 0.5.0, [real-model.yml](../.github/workflows/real-model.yml) runs the real setup and model on GitHub's machines, the way the mod starts it: install, start detached, one request with a name, an email and a town.
+
+| Machine | Python | Install | Start | One request | Found |
+| --- | --- | --- | --- | --- | --- |
+| Linux (ubuntu-latest) | 3.12 | 56 s | 6 s | 0.18 s | person, email, address |
+| Windows (windows-latest) | 3.12 | 88 s | 12 s | 0.30 s | person, email, address |
+| Apple silicon (macos-latest) | 3.12 | 97 s | 31 s | 0.64 s | person, email, address |
+| Intel Mac (macos-15-intel) | 3.11 | 148 s | 21 s | 1.54 s | person, email, address |
+
+Install times are on fast data-centre connections; at home the 1.5–2.5 GB download decides. Still to measure: how well it finds personal data across real text, and speed on long tool results ([#3](#3-speed-on-big-tool-results)).
 
 ### 2. Misses go out as written
 
