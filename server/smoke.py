@@ -64,7 +64,8 @@ def main():
     print(setup.stdout.replace("\r", ""))
     if setup.returncode != 0:
         fail(f"setup exited with {setup.returncode}", cache)
-    print(f"setup: {time.time() - t:.0f} s")
+    timings = {"setup": time.time() - t}
+    print(f"setup: {timings['setup']:.0f} s")
 
     python = sys.executable if args.fake else venv_python(cache)
     start = [python, os.path.join(HERE, "server.py"), "--daemon", "--port", str(PORT), "--cache", cache, *fake]
@@ -84,7 +85,8 @@ def main():
             if time.time() - t > args.start_limit:
                 fail(f"no /health answer within {args.start_limit} s", cache)
             time.sleep(1)
-    print(f"server ready in {time.time() - t:.0f} s: {health}")
+    timings["start"] = time.time() - t
+    print(f"server ready in {timings['start']:.0f} s: {health}")
     if health.get("app") != "pii-mask":
         fail(f"unexpected /health answer {health}", cache)
 
@@ -93,7 +95,8 @@ def main():
     labels = ["person", "email", "phone number", "address"]
     t = time.time()
     found = get("/detect", json.dumps({"texts": [text], "labels": labels, "threshold": 0.5}).encode(), timeout=120)["results"][0]
-    print(f"detect in {time.time() - t:.1f} s: {json.dumps(found, ensure_ascii=False)}")
+    timings["detect"] = time.time() - t
+    print(f"detect in {timings['detect']:.1f} s: {json.dumps(found, ensure_ascii=False)}")
     if args.fake:
         if not any(f["label"] == "email" and f["text"] == email for f in found):
             fail("the fake model did not find the email", cache)
@@ -106,6 +109,10 @@ def main():
         fail(f"a second start did not exit quietly ({again.returncode}, {again.stderr.strip()})", cache)
     print("second start exited quietly")
     print("OK")
+    if os.environ.get("GITHUB_ACTIONS"):
+        labels_found = ", ".join(sorted({f["label"] for f in found}))
+        print(f"::notice title=smoke test::{health.get('model')}: setup {timings['setup']:.0f} s, "
+              f"start {timings['start']:.0f} s, detect {timings['detect']:.2f} s; found {labels_found}")
 
 
 if __name__ == "__main__":
