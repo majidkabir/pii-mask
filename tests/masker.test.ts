@@ -49,6 +49,7 @@ describe('finds', () => {
 
   test('Claude Code\'s own words and placeholders are never finds', () => {
     expect(nerFinds([{ text: 'Claude', label: 'person' }, { text: 'Bash', label: 'person' }, { text: ph('PERSON', 1), label: 'person' }])).toEqual([])
+    expect(nerFinds([{ text: 'noreply' + '@anthropic.com', label: 'email' }, { text: 'Claude Sonnet', label: 'person' }])).toEqual([])
   })
 
   test('looksLikeName', () => {

@@ -89,6 +89,8 @@ export const ALWAYS_IGNORED = [
   'WebFetch', 'WebSearch', 'Agent', 'Task', 'TodoWrite', 'NotebookEdit', 'Skill', 'MCP', 'API', 'CLI', 'JSON',
   'YAML', 'CSV', 'PDF', 'HTML', 'HTTP', 'HTTPS', 'URL', 'README', 'Git', 'GitHub', 'npm', 'Node',
   'localhost', '127.0.0.1', '0.0.0.0', '::1',
+  // Claude Code's own commit attribution, in its instructions.
+  'noreply@anthropic.com',
 ]
 
 /** Placeholder labels: text that explains placeholders mentions them. */
