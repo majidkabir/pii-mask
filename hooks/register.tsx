@@ -632,7 +632,12 @@ export const register: Register = on => {
     // would only add false finds ("We") and delay. Patterns and every value
     // found so far still apply.
     const reply = (e.message as { role?: string }).role === 'assistant'
-    const rules = !texts.length ? [] : reply || isOwnRow(texts) ? [...PATTERNS, ...findRules([], vault)] : await rulesFor($, texts)
+    // Slash commands and their output (`/plugin install ...`, "✓ Installed")
+    // and notices are Claude Code's own rows. While the model isn't ready they
+    // get the patterns and known values instead of being removed, so the
+    // screen doesn't lose them right after installing.
+    const own = (e.door === 'command' || e.door === 'notice') && engine.state !== 'ready'
+    const rules = !texts.length ? [] : reply || own || isOwnRow(texts) ? [...PATTERNS, ...findRules([], vault)] : await rulesFor($, texts)
     const content = maskContent(e.message.content, rules)
     await persist($, before)
     return next({ ...e, message: { ...e.message, content } })

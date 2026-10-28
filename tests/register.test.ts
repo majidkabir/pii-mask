@@ -286,6 +286,21 @@ describe('the local model\'s life cycle', () => {
     expect(seen.status.join('\n')).not.toContain('BLOCKED')
   })
 
+  test('during the first install, a slash command and its output stay on screen, with the patterns applied', async ($, on) => {
+    const { clock } = world(on, { installed: false, up: false, setupHangs: true })
+    const pending = $.session.append({
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text: '/plugin install pii-mask, mail ' + 'a@' + 'b.se' }] },
+      door: 'command',
+      origin: { kind: 'user' },
+      uuid: 'c1',
+    } as never)
+    await clock.advance(100)
+    const text = JSON.stringify((await pending).message?.content)
+    expect(text).toContain('/plugin install pii-mask')
+    expect(text).not.toContain('could not check')
+    expect(text).toContain('EMAIL_1')
+  })
+
   test('installed but not running: the mod starts the server and masks as soon as it answers', async ($, on) => {
     const { seen, clock } = world(on, { up: false })
     const pending = appendPrompt($, 'Write to Lars Holm')
