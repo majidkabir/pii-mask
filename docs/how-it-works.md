@@ -96,7 +96,7 @@ flowchart TD
     class F,F2,F3 bad
 ```
 
-- **Install** (`server/setup.py`): a virtual environment in `~/.cache/pii-mask/venv`, PyTorch (on Linux from the CPU-only index first, which is a fraction of the default build), `gliner`, and the model, downloaded to `~/.cache/pii-mask/hf`. It reports each step to the status line and logs to `setup.log`. A hook can't run for minutes, so this runs in the background while requests are answered locally with the progress.
+- **Install** (`server/setup.py`): a virtual environment in `~/.cache/pii-mask/venv`, PyTorch (on Linux from the CPU-only index first, which is a fraction of the default build; on Intel Macs 2.2.2, the last release built for them, with `numpy<2` and `transformers<4.58`, and a Python of 3.12 or older found on the PATH), `gliner`, and the model, downloaded to `~/.cache/pii-mask/hf`. It reports each step to the status line and logs to `setup.log`. A hook can't run for minutes, so this runs in the background while requests are answered locally with the progress.
 - **Run** (`server/server.py`): detaches from the session that started it, so it keeps serving the other sessions. It binds `127.0.0.1` only, refuses a second start on the same port, loads the model with Hugging Face set to offline (nothing is fetched at run time), and never logs request text.
 - **Wait**: a hook that needs the model while it is loading waits up to 6 seconds, then fails closed. A model call may take 7 seconds. A server that stopped while idle is started again on the next call.
 

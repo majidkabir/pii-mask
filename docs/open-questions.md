@@ -12,6 +12,7 @@ Known gaps and what has not been verified yet.
 | 6 | [Machines where an organization manages Claude Code](#6-machines-where-an-organization-manages-claude-code) | ⚠️ Partly covered |
 | 7 | [Gaps shared with customer-mask](#7-gaps-shared-with-customer-mask) | ⚠️ Known |
 | 8 | [Windows](#8-windows) | ❌ Not supported |
+| 9 | [Intel Macs](#9-intel-macs) | 🟡 Fixed in 0.3.2, not yet confirmed on one |
 
 ### 1. The real model hasn't run with the mod
 
@@ -55,3 +56,7 @@ There, Claude Code's built-in guard runs before plugins a person installs, and s
 ### 8. Windows
 
 The server detaches with `fork`, and the setup expects `venv/bin/python`. Both are macOS and Linux only; on Windows the mod blocks with a message.
+
+### 9. Intel Macs
+
+PyTorch stopped publishing builds for Intel Macs after 2.2.2, and that release has none for Python 3.13. On a 2015 MacBook the first setup failed at "installing PyTorch". Since 0.3.2 the setup pins PyTorch 2.2.2, `numpy<2` (2.2.2 was built against numpy 1) and `transformers<4.58` (checked to accept PyTorch 2.2) on Intel Macs, and builds its environment with Python 3.12 or older from the PATH; an environment built earlier with a newer Python is replaced. The full set was resolved for `x86_64-apple-darwin` with uv (all ready-made builds, for Python 3.9 and 3.12), but not yet installed on a real Intel Mac. The model will also be slower on those machines.

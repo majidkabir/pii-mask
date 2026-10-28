@@ -30,6 +30,9 @@ jobs:
       - name: Run the mod's tests
         run: claude plugin test .
 
+      - name: Test the setup's choices per machine
+        run: python3 -m unittest discover -s server -v
+
       # The real model is not downloaded in CI; the server's fake mode checks
       # setup, start-up, the API and that a second start exits quietly.
       - name: Smoke-test the model server (fake mode)

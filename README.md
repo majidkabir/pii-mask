@@ -31,7 +31,7 @@ You don't make a list or set anything up. Two things work together, both **on yo
 
 ## Get started
 
-You need Claude Code, a Mac or Linux computer, and Python 3.9 or newer (most Macs and Linux machines already have it).
+You need Claude Code, a Mac or Linux computer, and Python 3.9 or newer (most Macs and Linux machines already have it). On an older Mac with an Intel processor, it also needs Python 3.12 or older next to it (`brew install python@3.12`), because the AI library it uses has no newer version for those Macs.
 
 **1. Install it.** In Claude Code, type:
 
