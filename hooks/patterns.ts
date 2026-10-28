@@ -146,7 +146,9 @@ export const PATTERNS: readonly PatternRule[] = [
     v => !looksLikeCode(v)),
 
   // Contact details and money
-  whole('email', 'EMAIL', /(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])/g),
+  // Claude Code's own commit attribution (noreply@anthropic.com) is not anyone's personal address.
+  whole('email', 'EMAIL', /(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])/g,
+    v => v.toLowerCase() !== 'noreply@anthropic.com'),
   whole('IBAN', 'IBAN', /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g, ibanValid),
   whole('card number', 'CARD', /(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])/g, cardValid),
 

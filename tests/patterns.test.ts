@@ -132,6 +132,7 @@ describe('what the patterns leave alone', () => {
     'lat/long 55.67, 12.56 (two decimals)',
     'values 10 20 30 40 50',
     'Pass the 123456 records to the parser',
+    'Co-Authored-By: Claude Sonnet 5.5 <noreply' + '@anthropic.com>',
   ]
   for (const text of ordinary) {
     test(text, () => expect([text, run(text).values]).toEqual([text, []]))

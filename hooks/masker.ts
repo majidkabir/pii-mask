@@ -119,6 +119,8 @@ const NOT_NAMES = new Set(
 
 export function looksLikeName(value: string): boolean {
   if (!/^\p{Lu}/u.test(value)) return false
+  // Claude itself ("Co-Authored-By: Claude Sonnet 5.5" in Claude Code's own instructions).
+  if (/^Claude(\s+(Code|Sonnet|Opus|Haiku|Fable|Mythos)\b.*)?$/.test(value)) return false
   if (value.split(/[\s.,]+/).filter(Boolean).every(w => NOT_NAMES.has(w.toLowerCase()))) return false
   if (/[^\p{L}\p{M}\p{N} .,&'’/-]/u.test(value) || value.includes('&&')) return false
   return value.split(/[\s/-]+/).every(w => !/\p{Ll}\p{Lu}/u.test(w))

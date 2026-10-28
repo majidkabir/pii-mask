@@ -108,13 +108,14 @@ const nerStats = { calls: 0, ms: 0, failures: 0 }
 function statusLine(): string {
   // A hard block (an old Claude Code). While the model installs or starts,
   // requests are held too, but the line says what is happening.
-  if (blocks.size) return `🔒 ${NAME}: BLOCKED`
+  // Claude Code puts the plugin's name in front of its status, so it isn't repeated here.
+  if (blocks.size) return '🔒 BLOCKED'
   switch (engine.state) {
-    case 'ready': return `🔒 ${NAME} on`
-    case 'installing': return `⏳ ${NAME}: installing its model (${engine.detail || 'first run'})`
-    case 'starting': return `⏳ ${NAME}: starting its model`
-    case 'failed': return `🔒 ${NAME}: model not running`
-    default: return `⏳ ${NAME}: checking its model`
+    case 'ready': return '🔒 on'
+    case 'installing': return `⏳ installing its model (${engine.detail || 'first run'})`
+    case 'starting': return '⏳ starting its model'
+    case 'failed': return '🔒 model not running'
+    default: return '⏳ checking its model'
   }
 }
 

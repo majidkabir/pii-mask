@@ -61,10 +61,11 @@ def folder_size(path):
     return total
 
 
-def report_size(cache, stop):
-    """Says how much is in the cache folder every few seconds, so the mod can show progress."""
+def report_size(cache, stop, baseline=0):
+    """Says every few seconds how much this run has added to the cache folder
+    (downloaded and installed), so the mod can show progress."""
     while not stop.wait(3):
-        say(f"SIZE {folder_size(cache)}")
+        say(f"SIZE {max(0, folder_size(cache) - baseline)}")
 
 
 def last_error(log_path):
@@ -231,7 +232,8 @@ def main():
             raise RuntimeError(f"{what} failed" + (f": {detail}" if detail else f" (exit {r.returncode}).") )
 
     stop = threading.Event()
-    threading.Thread(target=report_size, args=(cache, stop), daemon=True).start()
+    baseline = folder_size(cache)  # a retry counts only what it adds
+    threading.Thread(target=report_size, args=(cache, stop, baseline), daemon=True).start()
 
     how = plan(platform.system(), platform.machine())
     log.write(f"plan: {how}\n")
@@ -279,7 +281,7 @@ def main():
         return 1
     stop.set()
     shutil.rmtree(tmp, ignore_errors=True)
-    say(f"SIZE {folder_size(cache)}")
+    say(f"SIZE {max(0, folder_size(cache) - baseline)}")
 
     write_marker(marker, {"model": MODEL, "python": platform.python_version()})
     say("DONE")
