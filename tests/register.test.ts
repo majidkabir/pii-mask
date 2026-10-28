@@ -26,6 +26,8 @@ type World = {
   slowMs?: number
   /** The setup script never finishes (it is still downloading). */
   setupHangs?: boolean
+  /** The setup script fails, with this reason and fix. */
+  setupFails?: { reason: string; fix?: string }
   sections?: { id: string; text: string; scope: 'shared' | 'session' }[]
   reply?: TurnStepChunk[]
   version?: string
@@ -51,6 +53,9 @@ function world(on: On, w: World = {}) {
   on('session.messages', () => ({ value: [] }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  // Claude Code's own row above the prompt, beneath pii-mask's panel.
+  on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', props: {}, children: ['core row'] }) as never)
   on('fs.read', ($, e) => (files[e.path] === undefined ? { deny: `ENOENT: ${e.path}` } : { value: files[e.path] }))
   on('fs.exists', ($, e) => ({ value: e.path in files }))
   on('fs.write', ($, e) => {
@@ -69,10 +74,14 @@ function world(on: On, w: World = {}) {
   })
   on('process.spawn', async function* ($, e) {
     seen.spawns.push([...e.argv])
-    yield { stream: 'stdout' as const, text: 'STEP 1/4 creating a Python environment\nSTEP 2/4 installing PyTorch (the largest download)\n' }
+    yield { stream: 'stdout' as const, text: 'STEP 1/4 creating a Python environment\nSTEP 2/4 installing PyTorch (the largest download)\nSIZE 412000000\n' }
+    if (w.setupFails) {
+      yield { stream: 'stdout' as const, text: `${w.setupFails.fix ? `FIX ${w.setupFails.fix}\n` : ''}ERROR ${w.setupFails.reason}\n` }
+      return { value: { code: 1, signal: null } } as never // a call on $ is answered with { value }
+    }
     if (w.setupHangs) await clock.sleep(10_000_000)
     files[`${CACHE}/installed.json`] = '{}'
-    return { code: 0, signal: null }
+    return { value: { code: 0, signal: null } } as never
   })
   const answer = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
   on('http.fetch', async ($, e) => {
@@ -357,5 +366,67 @@ describe('pii-mask\'s own messages', () => {
     const text = JSON.stringify((await pending).message?.content)
     expect(text).not.toContain('Anna Berg')
     expect(text).toContain('could not check this content')
+  })
+})
+
+describe('the panel above the prompt', () => {
+  const mountBand = ($: Engine) =>
+    $.ui.mount({ plugin: 'pii-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } as never })
+
+  test('during the first install it shows the step, a progress bar, the MB so far and that nothing is sent', async ($, on) => {
+    const { clock } = world(on, { installed: false, up: false, setupHangs: true })
+    const pending = appendPrompt($, 'hello')
+    await clock.advance(7000)
+    await pending
+    const ui = await mountBand($)
+    const drawn = JSON.stringify(await ui.drawn())
+    expect(drawn).toContain('installing its local model')
+    expect(drawn).toContain('step 2 of 4: installing PyTorch')
+    expect(drawn).toContain('█')
+    expect(drawn).toContain('412 MB so far')
+    expect(drawn).toContain("Nothing is sent to Claude until it's ready")
+    await ui.unmount()
+  })
+
+  test('when the install fails it shows the reason, the fix and a Retry button', async ($, on) => {
+    const { clock } = world(on, {
+      installed: false,
+      up: false,
+      setupFails: { reason: 'this Intel Mac needs Python 3.12 or older for PyTorch, and only 3.13.1 was found.', fix: 'brew install python@3.12' },
+    })
+    const pending = appendPrompt($, 'hello')
+    await clock.advance(7000)
+    await pending
+    const ui = await mountBand($)
+    const drawn = JSON.stringify(await ui.drawn())
+    expect(drawn).toContain("can't start its local model")
+    expect(drawn).toContain('needs Python 3.12 or older')
+    expect(drawn).toContain('To fix it: brew install python@3.12')
+    expect(await ui.find({ key: 'retry' })).toBeDefined()
+    expect(await ui.find({ key: 'details' })).toBeDefined()
+    await ui.unmount()
+    // The answer to a request says the same.
+    const chunks = await collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+    expect(textOf(chunks)).toContain('To fix it: brew install python@3.12')
+  })
+
+  test('no Python at all: the fix names how to install it', async ($, on) => {
+    const { clock } = world(on, { installed: false, up: false, noPython: true })
+    const pending = appendPrompt($, 'hello')
+    await clock.advance(7000)
+    await pending
+    const ui = await mountBand($)
+    const drawn = JSON.stringify(await ui.drawn())
+    expect(drawn).toContain('Python 3.9 or newer is needed')
+    expect(drawn).toMatch(/To fix it: (brew install python@3\.12|sudo apt install python3)/)
+    await ui.unmount()
+  })
+
+  test('once the model runs, there is no panel', async ($, on) => {
+    world(on)
+    await appendPrompt($, 'Lars Holm')
+    const ui = await mountBand($)
+    expect(JSON.stringify(await ui.drawn())).not.toContain('pii-mask')
+    await ui.unmount()
   })
 })

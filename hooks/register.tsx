@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, TurnStepChunk } from 'claude-code'
 
-import type { VaultEntry } from '../types'
+import type { EngineView, VaultEntry } from '../types'
 import {
   cleanTranscript,
   compareVersions,
@@ -62,6 +62,9 @@ const LABELS = Object.keys(PII_LABELS)
 const vaultAtom = atom({ plugin: 'pii-mask', key: 'vault' } as const, [] as VaultEntry[])
 const markerAtom = atom({ plugin: 'pii-mask', key: 'marker' } as const, null as string | null)
 const statusAtom = atom({ plugin: 'pii-mask', key: 'status' } as const, `⏳ pii-mask: checking its model`)
+const engineAtom = atom({ plugin: 'pii-mask', key: 'engine' } as const, {
+  state: 'unknown', step: 0, steps: 0, detail: '', fix: '', mb: 0, since: 0, now: 0, folder: '',
+} as EngineView)
 const PANE = 'pii-mask'
 
 /** How the pane names each kind of value. */
@@ -86,7 +89,14 @@ let loading: Promise<void> | undefined
 /* ----------------------------------------------------------------- the model */
 
 type EngineState = 'unknown' | 'installing' | 'starting' | 'ready' | 'failed'
-const engine = { state: 'unknown' as EngineState, detail: '', cache: '' }
+const engine = { state: 'unknown' as EngineState, detail: '', cache: '', fix: '', step: 0, steps: 0, mb: 0, since: Date.now() }
+
+/** A failure with a known fix, shown with the reason. */
+class EngineError extends Error {
+  constructor(message: string, readonly fix = '') {
+    super(message)
+  }
+}
 let engineTask: Promise<void> | undefined
 /** Set when context Claude Code computes once was replaced by a note; re-rendered once the model runs. */
 let contextRedacted = false
@@ -106,18 +116,35 @@ function statusLine(): string {
   }
 }
 
-function setEngine($: EngineInterface, state: EngineState, detail = engine.detail): void {
-  const failedNow = state === 'failed' && engine.state !== 'failed'
+function setEngine($: EngineInterface, state: EngineState, detail = engine.detail, fix = ''): void {
+  const was = engine.state
+  if (state !== was) engine.since = Date.now()
   engine.state = state
   engine.detail = detail
+  engine.fix = state === 'failed' ? fix : ''
+  if (state !== 'installing') {
+    engine.step = 0
+    engine.steps = 0
+  }
   publishStatus($)
-  if (failedNow) {
+  const say = (text: string) => {
     try {
-      $.ui.toast(`${NAME}: ${detail}`)
+      $.ui.toast(text)
     } catch {
       // no surface to show it on
     }
   }
+  if (state === 'failed' && was !== 'failed') say(`${NAME} can't start its model: ${detail}`)
+  if (state === 'ready' && (was === 'installing' || was === 'failed')) say(`${NAME} is on: personal data is masked from now on.`)
+}
+
+/** Redraws the panel and the pane with the model's current state. */
+function showEngine($: EngineInterface): void {
+  const view: EngineView = {
+    state: engine.state, step: engine.step, steps: engine.steps, detail: engine.detail, fix: engine.fix,
+    mb: engine.mb, since: engine.since, now: Date.now(), folder: engine.cache,
+  }
+  void update($, engineAtom, () => view).catch(() => undefined)
 }
 
 /** Shows the state on the status line and in the pane (the pane also gets the reason, if blocked). */
@@ -130,6 +157,7 @@ function publishStatus($: EngineInterface): void {
     // No surface to show it on (headless): the state is still reported when a request is stopped.
   }
   void update($, statusAtom, () => (reason ? `${line}\n${reason}` : line)).catch(() => undefined) // redraws the pane
+  showEngine($)
 }
 
 /*
@@ -164,7 +192,8 @@ function blocked(): string | undefined {
       return `pii-mask is installing its local model, once (about 1–2 GB; now: ${engine.detail || 'starting'}). ` +
         'Send your message again when the status line shows "🔒 pii-mask on".'
     case 'failed':
-      return `pii-mask can't run its local model: ${engine.detail} Fix that, then run /pii-mask retry.`
+      return `pii-mask can't run its local model: ${engine.detail}` +
+        (engine.fix ? ` To fix it: ${engine.fix}.` : '') + ' Then run /pii-mask retry.'
     default:
       return 'pii-mask is starting its local model. Send your message again in a few seconds.'
   }
@@ -208,13 +237,22 @@ async function findPython($: EngineInterface): Promise<string> {
       // not on the PATH
     }
   }
-  throw new Error('Python 3.9 or newer is needed and none was found (install it from python.org).')
+  let mac = false
+  try {
+    mac = (await $.process.run(['uname', '-s'], { timeoutMs: 5000 })).stdout.trim() === 'Darwin'
+  } catch {
+    // assume Linux
+  }
+  throw new EngineError(
+    'Python 3.9 or newer is needed, and none was found.',
+    mac ? 'brew install python@3.12 (or install it from python.org)' : 'sudo apt install python3 python3-venv',
+  )
 }
 
 /** Starts the model if it isn't running, once at a time. Never rejects. */
 function startEngine($: EngineInterface): Promise<void> {
   engineTask ??= runEngine($)
-    .catch(err => setEngine($, 'failed', err instanceof Error ? err.message : String(err)))
+    .catch(err => setEngine($, 'failed', err instanceof Error ? err.message : String(err), err instanceof EngineError ? err.fix : ''))
     .finally(() => {
       engineTask = undefined
     })
@@ -224,7 +262,7 @@ function startEngine($: EngineInterface): Promise<void> {
 async function runEngine($: EngineInterface): Promise<void> {
   if (await serverUp($)) return engineReady($)
   if ((await $.env.get('OS')) === 'Windows_NT') {
-    throw new Error('Windows is not supported yet (the model server runs on macOS and Linux).')
+    throw new EngineError('Windows is not supported yet; the model server runs on macOS and Linux.', 'disable pii-mask on this machine (/plugin)')
   }
   const dir = await cacheDir($)
   engine.cache = dir
@@ -233,25 +271,35 @@ async function runEngine($: EngineInterface): Promise<void> {
   const root = $.plugin.root
 
   if (!(await $.fs.exists(`${dir}/installed.json`))) {
+    engine.mb = 0
     setEngine($, 'installing', 'preparing')
     const argv = [python, `${root}/server/setup.py`, '--cache', dir, ...(fake ? ['--fake'] : [])]
     const it = $.process.spawn({ argv })[Symbol.asyncIterator]()
     let lastError = ''
+    let fix = ''
     let buffered = ''
     for (;;) {
       const step = await it.next()
       if (step.done) {
-        if (step.value.code !== 0) {
-          throw new Error(`${lastError || 'the installation failed.'} The log is ${dir}/setup.log.`)
-        }
+        if (step.value.code !== 0) throw new EngineError(lastError || 'the installation failed.', fix)
         break
       }
       buffered += step.value.text
       const lines = buffered.split('\n')
       buffered = lines.pop() ?? ''
       for (const line of lines) {
-        if (line.startsWith('STEP ')) setEngine($, 'installing', line.slice(5).trim())
-        if (line.startsWith('ERROR ')) lastError = line.slice(6).trim()
+        const m = /^STEP (\d+)\/(\d+) (.*)$/.exec(line)
+        if (m) {
+          engine.step = Number(m[1])
+          engine.steps = Number(m[2])
+          engine.since = Date.now()
+          engine.detail = m[3] ?? ''
+          publishStatus($)
+        } else if (line.startsWith('SIZE ')) {
+          engine.mb = Math.round(Number(line.slice(5)) / 1e6)
+          showEngine($)
+        } else if (line.startsWith('ERROR ')) lastError = line.slice(6).trim()
+        else if (line.startsWith('FIX ')) fix = line.slice(4).trim()
       }
     }
   }
@@ -264,9 +312,13 @@ async function runEngine($: EngineInterface): Promise<void> {
   )
   for (let waited = 0; waited < START_LIMIT_MS; waited += 1000) {
     if (await serverUp($)) return engineReady($)
+    showEngine($) // the elapsed time keeps moving
     await $.clock.sleep(1000)
   }
-  throw new Error(`the model server did not start within ${START_LIMIT_MS / 1000} s. Its log is ${dir}/server.log.`)
+  throw new EngineError(
+    `the model server did not start within ${START_LIMIT_MS / 1000} s.`,
+    `see the end of ${dir}/server.log`,
+  )
 }
 
 async function engineReady($: EngineInterface): Promise<void> {
@@ -729,18 +781,39 @@ export const register: Register = on => {
     }
   })
 
+  // While pii-mask isn't ready, a panel above the prompt says what it is
+  // doing (install progress, starting) or why it can't run and how to fix it.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const view = await read($, engineAtom)
+    const block = blocks.values().next().value
+    const lines = engineLines(view, block)
+    if (lines.length === 0 || e.props.hasSurvey) return next(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {lines.map(l => renderLine(Text, l))}
+        {view.state === 'failed' && !block && (
+          <Box flexDirection="row" gap={2}>
+            <Button key="retry" label="Retry" onPress={() => { setEngine($, 'unknown', ''); void startEngine($) }} />
+            <Button key="details" label="Details" onPress={() => { void $.ui.open({ id: PANE, title: 'Masked by pii-mask' }) }} />
+          </Box>
+        )}
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const entries = await read($, vaultAtom)
-    const [statusLineText, ...reason] = (await read($, statusAtom)).split('\n')
+    const view = await read($, engineAtom)
+    const progress = engineLines(view, blocks.values().next().value)
     const marker = (await read($, markerAtom)) ?? ''
     const lines = paneLines(entries, marker)
-    const room = Math.max(3, (e.viewport?.rows ?? 30) - 5)
+    const room = Math.max(3, (e.viewport?.rows ?? 30) - 5 - progress.length)
     const shown = lines.length > room ? lines.slice(0, room - 1) : lines
     return (
       <Box flexDirection="column">
-        <Text bold>{statusLineText ?? ''}</Text>
-        {reason.length > 0 && <Text color="warning">{reason.join(' ')}</Text>}
+        {progress.length === 0 ? <Text bold>{`🔒 ${NAME} on`}</Text> : progress.map(l => renderLine(Text, l))}
         <Text dimColor>
           {entries.length === 0
             ? 'Nothing masked yet. Names, emails, phone numbers and other personal data appear here as they are found.'
@@ -778,4 +851,74 @@ export function paneLines(entries: readonly VaultEntry[], marker: string): { kin
     for (const e of group) lines.push({ kind: 'row', text: e.value, sub: `<<${e.token}.${marker}>>` })
   }
   return lines
+}
+
+/**
+ * One line of the panel or the pane, coloured by its tone. `Text` is the
+ * surface's own element from $.ui.resolve(e); its exact type differs per
+ * surface, and each call site already has it typed.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function renderLine(Text: any, l: ViewLine) {
+  switch (l.tone) {
+    case 'title': return <Text bold>{l.text}</Text>
+    case 'error': return <Text bold color="error">{l.text}</Text>
+    case 'fix': return <Text color="warning">{l.text}</Text>
+    case 'bar': return <Text color="claude">{l.text}</Text>
+    case 'dim': return <Text dimColor>{l.text}</Text>
+    default: return <Text>{l.text}</Text>
+  }
+}
+
+/** "2 min 05 s", "40 s". */
+function elapsed(ms: number): string {
+  const sec = Math.max(0, Math.round(ms / 1000))
+  return sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)} min ${String(sec % 60).padStart(2, '0')} s`
+}
+
+export type ViewLine = { text: string; tone?: 'title' | 'error' | 'fix' | 'dim' | 'bar' }
+
+/**
+ * What the panel above the prompt and the pane say while pii-mask is not
+ * ready: what it is doing, how far along it is, or why it can't run and how
+ * to fix it. Empty when the model is running and nothing blocks.
+ */
+export function engineLines(view: EngineView, block?: string): ViewLine[] {
+  const waiting = "Nothing is sent to Claude until it's ready."
+  if (block) return [{ text: '⚠ pii-mask is stopping every request', tone: 'error' }, { text: block }]
+  switch (view.state) {
+    case 'ready':
+      return []
+    case 'installing': {
+      const width = 24
+      const done = view.steps ? Math.round((width * (Math.max(1, view.step) - 0.5)) / view.steps) : 0
+      return [
+        { text: '⏳ pii-mask is installing its local model (first time only, about 1.5–2.5 GB)', tone: 'title' },
+        {
+          text: `${'█'.repeat(done)}${'░'.repeat(width - done)}  ` +
+            (view.steps ? `step ${view.step} of ${view.steps}: ${view.detail}` : view.detail),
+          tone: 'bar',
+        },
+        { text: `${view.mb} MB so far · ${elapsed(view.now - view.since)} on this step · ${waiting}`, tone: 'dim' },
+      ]
+    }
+    case 'failed':
+      return [
+        { text: "⚠ pii-mask can't start its local model", tone: 'error' },
+        { text: view.detail },
+        ...(view.fix ? [{ text: `To fix it: ${view.fix}`, tone: 'fix' as const }] : []),
+        {
+          text: `Then press Retry or type /pii-mask retry. ${waiting}` +
+            (view.folder ? ` Logs: ${view.folder}/setup.log and server.log` : ''),
+          tone: 'dim',
+        },
+      ]
+    case 'starting':
+      return [
+        { text: '⏳ pii-mask is starting its local model', tone: 'title' },
+        { text: `${elapsed(view.now - view.since)} · ${waiting}`, tone: 'dim' },
+      ]
+    default:
+      return [{ text: '⏳ pii-mask is checking its local model…', tone: 'title' }]
+  }
 }

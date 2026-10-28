@@ -4,6 +4,25 @@ export type VaultEntry = {
   label: string
 }
 
+/** What the panel above the prompt and the pane show about the local model. */
+export type EngineView = {
+  state: 'unknown' | 'installing' | 'starting' | 'ready' | 'failed'
+  /** The install step (1-based) and how many there are; 0 outside the install. */
+  step: number
+  steps: number
+  /** What is happening now, or why it failed. */
+  detail: string
+  /** A command or action that fixes the failure, when one is known. */
+  fix: string
+  /** MB downloaded and installed so far (the install folder's size). */
+  mb: number
+  /** When the current state began, and now (ms), so the elapsed time redraws. */
+  since: number
+  now: number
+  /** Where the install and server logs are. */
+  folder: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'pii-mask': {
@@ -12,6 +31,7 @@ declare module 'claude-code' {
       marker: string | null
       /** The status line's text, which the pane shows too. */
       status: string
+      engine: EngineView
     }
   }
 }

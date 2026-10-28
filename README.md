@@ -39,7 +39,15 @@ You need Claude Code, a Mac or Linux computer, and Python 3.9 or newer (most Mac
 /plugin install pii-mask --marketplace majidkabir/pii-mask
 ```
 
-**2. Wait once.** The first time, pii-mask downloads its model (about 1.5–2.5 GB) and sets it up. That takes a few minutes. The status line at the bottom of Claude Code shows the progress. Until it says **🔒 pii-mask on**, nothing is sent to Claude at all.
+**2. Wait once.** The first time, pii-mask downloads its model (about 1.5–2.5 GB) and sets it up. That takes a few minutes. A panel above where you type shows how it's going:
+
+```
+⏳ pii-mask is installing its local model (first time only, about 1.5–2.5 GB)
+█████████░░░░░░░░░░░░░░░  step 2 of 4: installing PyTorch (the largest download)
+412 MB so far · 1 min 40 s on this step · Nothing is sent to Claude until it's ready.
+```
+
+If something goes wrong, the panel says what, and gives you the exact command that fixes it, with a **Retry** button. When it's done, a message says **pii-mask is on**, the panel goes away, and nothing is sent to Claude before that.
 
 **3. Work as usual.** From then on, it starts by itself whenever you open Claude Code.
 

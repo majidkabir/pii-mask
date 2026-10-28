@@ -7,8 +7,10 @@ Everything stays in that folder; delete it to start over.
 
     python3 server/setup.py --cache ~/.cache/pii-mask
 
-Prints one line per step for the mod's status line ("STEP 2/4 ..."), "ERROR
-..." when a step fails, and writes the details to <cache>/setup.log.
+Prints, for the mod to show: "STEP 2/4 <what>" at each step, "SIZE <bytes>"
+every few seconds (what has been downloaded and installed so far), and on
+failure "ERROR <reason>" and, when there is one, "FIX <command to run>".
+The details go to <cache>/setup.log.
 """
 
 import argparse
@@ -18,6 +20,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 MODEL = "urchade/gliner_multi_pii-v1"
@@ -34,6 +37,55 @@ INTEL_MAC_EXTRA = ["transformers>=4.51.3,<4.58", "numpy<2"]
 
 def say(line):
     print(line, flush=True)
+
+
+def folder_size(path):
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def report_size(cache, stop):
+    """Says how much is in the cache folder every few seconds, so the mod can show progress."""
+    while not stop.wait(3):
+        say(f"SIZE {folder_size(cache)}")
+
+
+def last_error(log_path):
+    """The last line in the log that says what went wrong (pip's "ERROR: ...", a Python exception)."""
+    try:
+        lines = open(log_path, encoding="utf-8", errors="replace").read().splitlines()[-200:]
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        s = line.strip()
+        if s.startswith("ERROR:") or re_exception(s):
+            return s[:300]
+    return ""
+
+
+def re_exception(line):
+    head = line.split(":", 1)[0]
+    return head.endswith(("Error", "Exception")) and " " not in head
+
+
+def fix_for(reason, system):
+    """A command that fixes a known failure, or None."""
+    r = reason.lower()
+    if "ensurepip" in r or "venv" in r and system == "Linux":
+        return "sudo apt install python3-venv"
+    if "no matching distribution found for torch" in r:
+        return "install Python 3.12 (brew install python@3.12, or your package manager), then /pii-mask retry"
+    if "no space left" in r:
+        return "free some disk space (about 3 GB), then /pii-mask retry"
+    if "connection" in r or "timed out" in r or "temporary failure in name resolution" in r:
+        return "check your internet connection, then /pii-mask retry"
+    return None
 
 
 def is_intel_mac(system=None, machine=None):
@@ -90,18 +142,29 @@ def main():
         say("ERROR Python 3.9 or newer is needed.")
         return 1
 
-    log = open(os.path.join(cache, "setup.log"), "a", encoding="utf-8")
+    log_path = os.path.join(cache, "setup.log")
+    log = open(log_path, "a", encoding="utf-8")
     log.write(f"\n--- setup {time.strftime('%Y-%m-%d %H:%M:%S')} on {platform.platform()}, Python {platform.python_version()}\n")
     log.flush()
     venv = os.path.join(cache, "venv")
     py = os.path.join(venv, "bin", "python")
 
-    def run(cmd, what, env=None):
+    # Downloads go through a temporary folder inside the cache, so its size shows progress.
+    tmp = os.path.join(cache, "tmp")
+    os.makedirs(tmp, exist_ok=True)
+    base_env = dict(os.environ, TMPDIR=tmp, PIP_PROGRESS_BAR="off", HF_HOME=os.path.join(cache, "hf"))
+
+    def run(cmd, what):
         log.write("$ " + " ".join(cmd) + "\n")
         log.flush()
-        r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
+        r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=base_env)
+        log.flush()
         if r.returncode != 0:
-            raise RuntimeError(f"{what} failed (exit {r.returncode}).")
+            detail = last_error(log_path)
+            raise RuntimeError(f"{what} failed" + (f": {detail}" if detail else f" (exit {r.returncode}).") )
+
+    stop = threading.Event()
+    threading.Thread(target=report_size, args=(cache, stop), daemon=True).start()
 
     how = plan(platform.system(), platform.machine())
     log.write(f"plan: {how}\n")
@@ -110,9 +173,9 @@ def main():
         base = pick_python(how["python_max"])
         if base is None:
             major, minor = how["python_max"]
+            say(f"FIX brew install python@{major}.{minor}")
             raise RuntimeError(
-                f"PyTorch for this Intel Mac needs Python {major}.{minor} or older, and this is {platform.python_version()}. "
-                f"Install it (brew install python@{major}.{minor}), then run /pii-mask retry."
+                f"this Intel Mac needs Python {major}.{minor} or older for PyTorch, and only {platform.python_version()} was found."
             )
         have = venv_version(py) if os.path.exists(py) else None
         if have and how["python_max"] and have > how["python_max"]:
@@ -139,11 +202,17 @@ def main():
         run([py, "-m", "pip", "install", "--quiet", GLINER, *how["extra"]], "installing GLiNER")
 
         say("STEP 4/4 downloading the PII model")
-        env = dict(os.environ, HF_HOME=os.path.join(cache, "hf"))
-        run([py, "-c", f"from gliner import GLiNER; GLiNER.from_pretrained({MODEL!r})"], "downloading the model", env)
+        run([py, "-c", f"from gliner import GLiNER; GLiNER.from_pretrained({MODEL!r})"], "downloading the model")
     except RuntimeError as err:
+        stop.set()
+        fix = fix_for(str(err), platform.system())
+        if fix:
+            say(f"FIX {fix}")
         say(f"ERROR {err}")
         return 1
+    stop.set()
+    shutil.rmtree(tmp, ignore_errors=True)
+    say(f"SIZE {folder_size(cache)}")
 
     write_marker(marker, {"model": MODEL, "python": platform.python_version()})
     say("DONE")
