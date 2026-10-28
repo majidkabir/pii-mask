@@ -47,6 +47,33 @@ ModuleNotFoundError: Could not import module 'ModernBertModel'. Are this object'
         self.assertIn("ModernBertModel", msg)
         self.assertIn("python@3.11", fix_for(msg, "Darwin"))
 
+    def test_message_on_the_lines_after_the_exception(self):
+        # What transformers raises when the tokenizer's converter lacks protobuf (seen on an Intel Mac).
+        log = """Traceback (most recent call last):
+  File "convert_slow_tokenizer.py", line 553, in __init__
+    requires_backends(self, "protobuf")
+  File "import_utils.py", line 2143, in requires_backends
+    raise ImportError("".join(failed))
+ImportError:
+DebertaV2Converter requires the protobuf library but it was not found in your environment. Check out the instructions on the
+installation page of its repo: https://github.com/protocolbuffers/protobuf/tree/master/python#installation and follow the ones
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ImportError:
+GLiNER could not load the tokenizer.""".splitlines()
+        msg = error_in(log)
+        self.assertIn("DebertaV2Converter requires the protobuf library", msg)
+        self.assertIn("(then: ImportError: GLiNER could not load the tokenizer.)", msg)
+        self.assertEqual(fix_for(msg, "Darwin"), "~/.cache/pii-mask/venv/bin/pip install protobuf, then /pii-mask retry")
+
+    def test_tokenizer_libraries_are_installed(self):
+        from setup import TOKENIZER
+        self.assertIn("protobuf", TOKENIZER)
+        self.assertIn("sentencepiece", TOKENIZER)
+
     def test_pip_error_line_wins(self):
         self.assertEqual(error_in(["Collecting torch", "ERROR: No matching distribution found for torch"]),
                          "ERROR: No matching distribution found for torch")

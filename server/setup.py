@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,10 @@ import time
 
 MODEL = "urchade/gliner_multi_pii-v1"
 GLINER = "gliner>=0.2.16,<0.3"
+# The PII model's tokenizer (mdeberta) is converted on first load, which needs
+# protobuf ("DebertaV2Converter requires the protobuf library") and sentencepiece.
+# Neither is a dependency of GLiNER.
+TOKENIZER = ["protobuf", "sentencepiece"]
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 
@@ -88,8 +93,25 @@ def error_in(lines):
         else:
             break
     if root == last:
-        return stripped[last][:300]
-    return f"{stripped[root][:200]} (then: {stripped[last][:120]})"
+        return message_at(stripped, last)[:300]
+    return f"{message_at(stripped, root)[:200]} (then: {message_at(stripped, last)[:120]})"
+
+
+def message_at(stripped, i):
+    """The exception on line i with its message. Some messages start on the next
+    line ("ImportError:" then "X requires the protobuf library ..."), so those
+    lines are joined until the traceback goes on."""
+    line = stripped[i]
+    if line.split(":", 1)[1].strip():
+        return line
+    more = []
+    for s in stripped[i + 1:]:
+        if not s or s.startswith(("Traceback", "File ", "The above exception", "During handling")) or re_exception(s):
+            break
+        more.append(s)
+        if len(" ".join(more)) > 300:
+            break
+    return (line + " " + " ".join(more)).strip()
 
 
 def re_exception(line):
@@ -106,6 +128,9 @@ def fix_for(reason, system):
         return "install Python 3.11 (brew install python@3.11), then /pii-mask retry"
     if "no matching distribution found for torch" in r:
         return "install Python 3.11 (brew install python@3.11, or your package manager), then /pii-mask retry"
+    missing = re.search(r"requires the (\w[\w.-]*) library", reason)
+    if missing:
+        return f"~/.cache/pii-mask/venv/bin/pip install {missing.group(1)}, then /pii-mask retry"
     if "no space left" in r:
         return "free some disk space (about 3 GB), then /pii-mask retry"
     if "connection" in r or "timed out" in r or "temporary failure in name resolution" in r:
@@ -224,7 +249,7 @@ def main():
                 run([py, "-m", "pip", "install", "--quiet", *how["torch"]], "installing PyTorch")
 
         say("STEP 3/4 installing GLiNER")
-        run([py, "-m", "pip", "install", "--quiet", GLINER, *how["extra"]], "installing GLiNER")
+        run([py, "-m", "pip", "install", "--quiet", GLINER, *TOKENIZER, *how["extra"]], "installing GLiNER")
 
         say("STEP 4/4 downloading the PII model")
         run([py, "-c", f"from gliner import GLiNER; GLiNER.from_pretrained({MODEL!r})"], "downloading the model")
