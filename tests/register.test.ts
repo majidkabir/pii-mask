@@ -311,7 +311,8 @@ describe('the pane', () => {
     expect(opened).toBe('pii-mask')
     expect(JSON.stringify(a)).toContain('Opened the pii-mask pane: 1 value(s) masked')
     const b = await $.command.run({ command: 'pii-mask', args: 'status' } as never)
-    expect(JSON.stringify(b)).toContain('Lars Holm')
+    expect(JSON.stringify(b)).toContain('Values masked: 1')
+    expect(JSON.stringify(b)).not.toContain('Lars Holm') // values are only shown in the pane
   })
 })
 
@@ -322,5 +323,39 @@ describe('built-in patterns', () => {
     const text = JSON.stringify(stored.message?.content)
     const m = markerIn(text)
     expect(text).toContain(`Refund ${ph('IBAN', 1, m)}, card ${ph('CARD', 1, m)}, mail ${ph('EMAIL', 1, m)}`)
+  })
+})
+
+describe('pii-mask\'s own messages', () => {
+  test('when the model is down, the reason it gives and its status still reach the screen', async ($, on) => {
+    const { clock } = world(on, { installed: false, up: false, setupHangs: true })
+    const pending = collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+    await clock.advance(7000)
+    const stop = textOf(await pending)
+    expect(stop).toContain('installing its local model')
+    // The engine stores the answer as a row, like any reply.
+    const reply = await $.session.append({
+      message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: stop }] },
+      door: 'response', origin: { kind: 'model', model: 'claude' }, uuid: 'a1',
+    } as never)
+    expect(JSON.stringify(reply.message?.content)).toContain('installing its local model')
+    // The status command's invocation and output rows too.
+    const status = (await $.command.run({ command: 'pii-mask', args: 'status' } as never)) as { text: string }
+    for (const text of ['<command-name>/pii-mask</command-name>\n<command-args>status</command-args>', `<local-command-stdout>${status.text}</local-command-stdout>`]) {
+      const row = await $.session.append({
+        message: { type: 'user', role: 'user', content: [{ type: 'text', text }] },
+        door: 'command', origin: { kind: 'user' }, uuid: `c${text.length}`,
+      } as never)
+      expect(JSON.stringify(row.message?.content)).not.toContain('could not check this content')
+    }
+  })
+
+  test('a row that mixes pii-mask\'s words with anything else is still checked by the model', async ($, on) => {
+    const { clock } = world(on, { installed: false, up: false, setupHangs: true })
+    const pending = appendPrompt($, '/pii-mask status\nAnna Berg')
+    await clock.advance(7000)
+    const text = JSON.stringify((await pending).message?.content)
+    expect(text).not.toContain('Anna Berg')
+    expect(text).toContain('could not check this content')
   })
 })

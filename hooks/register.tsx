@@ -107,15 +107,51 @@ function statusLine(): string {
 }
 
 function setEngine($: EngineInterface, state: EngineState, detail = engine.detail): void {
+  const failedNow = state === 'failed' && engine.state !== 'failed'
   engine.state = state
   engine.detail = detail
+  publishStatus($)
+  if (failedNow) {
+    try {
+      $.ui.toast(`${NAME}: ${detail}`)
+    } catch {
+      // no surface to show it on
+    }
+  }
+}
+
+/** Shows the state on the status line and in the pane (the pane also gets the reason, if blocked). */
+function publishStatus($: EngineInterface): void {
   const line = statusLine()
+  const reason = blocked()
   try {
     $.ui.status(line)
   } catch {
     // No surface to show it on (headless): the state is still reported when a request is stopped.
   }
-  void update($, statusAtom, () => line).catch(() => undefined) // redraws the pane
+  void update($, statusAtom, () => (reason ? `${line}\n${reason}` : line)).catch(() => undefined) // redraws the pane
+}
+
+/*
+ * Text pii-mask writes itself: the answer it gives when it stops a request,
+ * and its command's output. Claude Code stores these as conversation rows,
+ * so they pass session.append like any row; but they hold no personal data
+ * (they never list values), so a row made only of them skips the model.
+ * Otherwise, with the model down, they would be removed too, and the reason
+ * the model is down would never reach the screen.
+ */
+const ownLines = new Set<string>(['/pii-mask', 'pii-mask', 'status', 'retry', '/pii-mask status', '/pii-mask retry'])
+
+/** Records text pii-mask wrote, line by line, and returns it. */
+function own(text: string): string {
+  for (const l of text.split('\n')) if (l.trim()) ownLines.add(l.trim())
+  return text
+}
+
+/** A row whose every line (Claude Code's wrapper tags aside) is pii-mask's own. */
+function isOwnRow(texts: readonly string[]): boolean {
+  const lines = texts.flatMap(t => t.replace(/<[^>]*>/g, '\n').split('\n')).map(l => l.trim()).filter(Boolean)
+  return lines.length > 0 && lines.every(l => ownLines.has(l))
 }
 
 /** Why requests are blocked, if they are: a block, or a model that isn't running. */
@@ -518,7 +554,7 @@ export const register: Register = on => {
     await ready($)
     const before = vault.size
     const texts = textsOf(e.message.content)
-    const rules = texts.length ? await rulesFor($, texts) : []
+    const rules = !texts.length ? [] : isOwnRow(texts) ? [...PATTERNS, ...findRules([], vault)] : await rulesFor($, texts)
     const content = maskContent(e.message.content, rules)
     await persist($, before)
     return next({ ...e, message: { ...e.message, content } })
@@ -551,7 +587,7 @@ export const register: Register = on => {
     }
     const reason = blocked()
     if (reason !== undefined) {
-      const text = `${NAME} stopped this request, so no personal data could leak. ${reason}`
+      const text = own(`${NAME} stopped this request, so no personal data could leak. ${reason}`)
       yield { kind: 'text', index: 0, text }
       return { turnId: e.turnId, index: e.index, answer: text, toolUses: [], stopReason: 'end_turn', usage: null }
     }
@@ -657,50 +693,54 @@ export const register: Register = on => {
       description: 'Open the pane listing everything pii-mask has masked; "status" prints it, "retry" restarts the model.',
       argumentHint: '[status|retry]',
     })
-    $.ui.status(statusLine())
+    publishStatus($)
     return next(e)
   })
 
   on('command.run', { command: 'pii-mask' }, async ($, e) => {
     await ready($)
     const arg = e.args.trim()
+    // Everything said here is pii-mask's own text and never lists a value
+    // (the pane does that, on screen only), so it shows even when the model is down.
     if (arg === 'retry') {
       if (engine.state !== 'ready') setEngine($, 'unknown', '')
       void startEngine($)
-      return { text: 'Starting the local model again. The status line shows when it is ready.' }
+      return { text: own('Starting the local model again. The status line shows when it is ready.') }
     }
     if (arg !== '' && arg !== 'status') {
-      return { text: `Unknown option "${arg}". Use /pii-mask to open the pane, /pii-mask status, or /pii-mask retry.` }
+      return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, or /pii-mask retry.') }
     }
     if (arg === '') {
       const opened = await $.ui.open({ id: PANE, title: 'Masked by pii-mask' })
-      if (opened.isPlaced) return { text: `Opened the pii-mask pane: ${vault.size} value(s) masked so far. It updates as more are found.` }
+      if (opened.isPlaced) return { text: own(`Opened the pii-mask pane: ${vault.size} value(s) masked so far.`) }
     }
-    const rows = vault.entries().map(v => `  ${vault.format(v.token)}  →  ${v.value}`)
+    const dir = engine.cache || (await cacheDir($))
     return {
-      text: [
-        `${NAME}: ${blocked() ?? 'active'}`,
-        `Model: ${engine.state}${engine.detail ? ` (${engine.detail})` : ''}, GLiNER PII on ${BASE}` +
-          (engine.cache ? `, files in ${engine.cache}` : ''),
-        `Model calls: ${nerStats.calls} (${nerStats.calls ? Math.round(nerStats.ms / nerStats.calls) : 0} ms on average), failed: ${nerStats.failures}`,
-        `Images/PDFs removed: ${mediaDropped} · rows removed because they couldn't be checked: ${rowsRemoved}`,
-        `Placeholder table: ${sessionFile ?? 'not yet saved (no transcript known)'}`,
-        rows.length ? `Replaced this session (${rows.length}):\n${rows.join('\n')}` : 'Nothing replaced yet.',
-      ].join('\n'),
+      text: own(
+        [
+          `${NAME}: ${blocked() ?? 'on, the local model is running.'}`,
+          `Model: ${engine.state}${engine.detail ? ` (${engine.detail})` : ''}, GLiNER PII on ${BASE}`,
+          `Model calls: ${nerStats.calls} (${nerStats.calls ? Math.round(nerStats.ms / nerStats.calls) : 0} ms on average), failed: ${nerStats.failures}`,
+          `Values masked: ${vault.size} (open /pii-mask to see them) · rows removed unchecked: ${rowsRemoved} · images/PDFs removed: ${mediaDropped}`,
+          `Install log: ${dir}/setup.log`,
+          `Server log: ${dir}/server.log`,
+        ].join('\n'),
+      ),
     }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const entries = await read($, vaultAtom)
-    const status = await read($, statusAtom)
+    const [statusLineText, ...reason] = (await read($, statusAtom)).split('\n')
     const marker = (await read($, markerAtom)) ?? ''
     const lines = paneLines(entries, marker)
     const room = Math.max(3, (e.viewport?.rows ?? 30) - 5)
     const shown = lines.length > room ? lines.slice(0, room - 1) : lines
     return (
       <Box flexDirection="column">
-        <Text bold>{status}</Text>
+        <Text bold>{statusLineText ?? ''}</Text>
+        {reason.length > 0 && <Text color="warning">{reason.join(' ')}</Text>}
         <Text dimColor>
           {entries.length === 0
             ? 'Nothing masked yet. Names, emails, phone numbers and other personal data appear here as they are found.'
@@ -716,7 +756,7 @@ export const register: Register = on => {
             </Box>
           ),
         )}
-        {lines.length > shown.length && <Text dimColor>{`… ${lines.length - shown.length} more. /pii-mask status lists them all.`}</Text>}
+        {lines.length > shown.length && <Text dimColor>{`… ${lines.length - shown.length} more; make the pane taller to see them.`}</Text>}
       </Box>
     )
   })
