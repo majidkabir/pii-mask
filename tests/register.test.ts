@@ -632,7 +632,8 @@ describe('images and PDFs', () => {
     expect(seen.read).toMatch(/^\/proj\/\.claude\/pii-mask\/read-.*\.png$/)
     const redact = seen.mediaCalls.find(c => c.kind === 'redact')?.body
     expect(redact).toMatchObject({ path: '/proj/card.png', out: seen.read, faces: true, boxes: [{ box: [100, 0, 185, 20], label: 'PERSON_1' }] })
-    expect(seen.writes['/proj/.claude/pii-mask/.gitignore']).toContain('*')
+    const ignore = Object.keys(seen.writes).find(k => k.replace(/\\/g, '/').endsWith('/proj/.claude/pii-mask/.gitignore'))
+    expect(ignore && seen.writes[ignore]).toContain('*')
     // The tool result Claude Code builds from the copy keeps its image, and gets the text.
     await $.session.append(readResult('t9', image(REDACTED_PNG)) as never)
     const inner = (seen.appended.at(-1) as { content: { type: string; text?: string }[] }[])[0]?.content ?? []
