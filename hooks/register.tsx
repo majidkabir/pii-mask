@@ -23,6 +23,7 @@ import {
   UNCHECKED_NOTE,
   unmask,
   unmaskDeep,
+  valueSpans,
   Vault,
   vaultFileFor,
   type NerEntity,
@@ -30,7 +31,8 @@ import {
   type Rule,
   type VaultFile,
 } from './masker'
-import { PATTERNS } from './patterns'
+import { boxLabel, imageText, pdfText, spanBoxes, type Box, type OcrLine } from './media'
+import { OCR_PATTERNS, PATTERNS } from './patterns'
 
 /*
  * Where data flows and what this mod does there:
@@ -73,7 +75,7 @@ const KINDS: Record<string, string> = {
   PERSON: 'People', EMAIL: 'Emails', PHONE: 'Phone numbers', ADDRESS: 'Addresses', IBAN: 'IBANs',
   ACCOUNT: 'Bank accounts', CARD: 'Card numbers', ID_NUMBER: 'ID numbers', PASSPORT: 'Passport numbers',
   BIRTHDATE: 'Dates of birth', IP: 'IP addresses', MAC: 'Device addresses', LOCATION: 'Coordinates',
-  SECRET: 'Passwords and keys',
+  SECRET: 'Passwords and keys', NUMBER: 'Numbers (in images)',
 }
 
 // Module state: rebuilt on every (re)load; the vault itself is restored from $.state.
@@ -235,7 +237,10 @@ async function withTimeout<T>($: EngineInterface, p: Promise<T>, ms: number): Pr
 async function serverUp($: EngineInterface): Promise<boolean> {
   try {
     const res = await withTimeout($, $.http.fetch(`${BASE}/health`), 1500)
-    return res.ok && (JSON.parse(res.text) as { app?: string }).app === NAME
+    const body = JSON.parse(res.text) as { app?: string; media?: MediaStatus }
+    mediaStatus = body.media ?? {}
+    mediaCheckedAt = Date.now()
+    return res.ok && body.app === NAME
   } catch {
     return false
   }
@@ -425,6 +430,67 @@ async function engineReady($: EngineInterface): Promise<void> {
     await $.ui.invalidate('prompt.context')
   }
   await $.ui.invalidate('prompt.section')
+  void addMediaSupport($)
+}
+
+/** Where a failed add-on install of image support is remembered, like a failed install. */
+const MEDIA_FAILED_FILE = 'media-failed.json'
+let mediaInstall: 'idle' | 'running' | 'failed' | 'done' = 'idle'
+let mediaInstallError = ''
+
+/**
+ * An install made before images and PDFs were supported has none of their
+ * libraries: add them in the background (text is masked meanwhile, images
+ * are dropped). Once per session; a failure isn't tried again until
+ * `/pii-mask media install` or a new version.
+ */
+async function addMediaSupport($: EngineInterface, retry = false): Promise<void> {
+  if (mediaInstall === 'running') return
+  if (!retry && mediaInstall !== 'idle') return
+  if (mediaStatus.pdf && mediaStatus.images && mediaStatus.faces) return
+  if ((await $.env.get('PII_MASK_FAKE_MODEL')) === '1') return
+  const dir = engine.cache || (await cacheDir($))
+  const version = await pluginVersion($)
+  if (!retry) {
+    try {
+      const before = JSON.parse(await $.fs.read(`${dir}/${MEDIA_FAILED_FILE}`)) as { version?: string; reason?: string }
+      if (before.version === version) {
+        mediaInstall = 'failed'
+        mediaInstallError = before.reason ?? ''
+        return
+      }
+    } catch {
+      // none recorded
+    }
+  }
+  mediaInstall = 'running'
+  mediaInstallError = ''
+  publishStatus($)
+  try {
+    const python = await findPython($)
+    const it = $.process.spawn({ argv: [...python, `${$.plugin.root}/server/setup.py`, '--cache', dir, '--media'] })[Symbol.asyncIterator]()
+    let error = ''
+    for (;;) {
+      const step = await it.next()
+      if (step.done) {
+        if (step.value.code !== 0) throw new Error(error || 'the install failed.')
+        break
+      }
+      for (const line of step.value.text.split('\n')) if (line.startsWith('ERROR ')) error = line.slice(6).trim()
+    }
+    mediaInstall = 'done'
+    mediaCheckedAt = 0 // ask the server again on the next image
+    await serverUp($)
+  } catch (err) {
+    mediaInstall = 'failed'
+    mediaInstallError = err instanceof Error ? err.message : String(err)
+    try {
+      await $.fs.write(`${dir}/${MEDIA_FAILED_FILE}`, JSON.stringify({ version, reason: mediaInstallError }))
+    } catch {
+      // the next session tries again
+    }
+  }
+  publishStatus($)
 }
 
 /**
@@ -621,7 +687,7 @@ function maskBlock(block: Block, rules: readonly Rule[]): Block {
       return {
         ...block,
         content: (c as Block[]).map(inner => {
-          if (!isMedia(inner)) return maskBlock(inner, rules)
+          if (!isMedia(inner) || checkedMedia.has(inner)) return maskBlock(inner, rules)
           mediaDropped += 1
           return { type: 'text', text: MEDIA_NOTE }
         }),
@@ -633,7 +699,7 @@ function maskBlock(block: Block, rules: readonly Rule[]): Block {
 
 /** Masks a row's blocks; its own media blocks are dropped and a note added to its first text. */
 function maskContent(content: readonly Block[], rules: readonly Rule[]): Block[] {
-  const kept = content.filter(b => !isMedia(b))
+  const kept = content.filter(b => !isMedia(b) || checkedMedia.has(b))
   const dropped = content.length - kept.length
   if (dropped === 0) return content.map(b => maskBlock(b, rules))
   mediaDropped += dropped
@@ -652,6 +718,294 @@ function redactContent(content: readonly Block[]): Block[] {
   return content
     .filter(b => !MEDIA_BLOCKS.has(b.type))
     .map(b => (b.type === 'text' ? { ...b, text: UNCHECKED_NOTE } : b.type === 'tool_result' ? { ...b, content: UNCHECKED_NOTE } : b))
+}
+
+/* ------------------------------------------------------------ images, PDFs */
+
+/**
+ * What pii-mask does with images and PDFs, each switchable with
+ * `/pii-mask media <name> on|off` and kept across sessions:
+ * - pdf: a PDF with text is sent as its masked text;
+ * - images: an image (and a scanned PDF's pages) is read with OCR and sent with
+ *   boxes over the personal data in it;
+ * - faces: faces in images are pixelated;
+ * - imageText: the text read in an image is sent too, masked, so Claude can
+ *   read it reliably.
+ * Switched off, not installed, unreadable or too slow: dropped with a note.
+ */
+type MediaSettings = { pdf: boolean; images: boolean; faces: boolean; imageText: boolean }
+type MediaStatus = { pdf?: boolean; images?: boolean; faces?: boolean }
+const MEDIA_DEFAULTS: MediaSettings = { pdf: true, images: true, faces: true, imageText: true }
+const MEDIA_SWITCHES: Record<string, keyof MediaSettings> = { pdf: 'pdf', images: 'images', faces: 'faces', 'image-text': 'imageText' }
+const MEDIA_HELP: Record<keyof MediaSettings, string> = {
+  pdf: 'PDFs with text are sent as their masked text',
+  images: 'images and scanned PDF pages are sent with boxes over personal data',
+  faces: 'faces in images are pixelated',
+  imageText: "the text read in an image is sent too, masked",
+}
+/** At most this many images per row: each takes seconds, and a row has 10 s. */
+const MAX_IMAGES_PER_ROW = 2
+/** Blocks made from an image or PDF: sent as they are, not dropped as media. */
+const checkedMedia = new WeakSet<object>()
+const mediaStats = { pdfs: 0, images: 0, boxes: 0, faces: 0 }
+let mediaStatus: MediaStatus = {}
+let mediaCheckedAt = 0
+
+async function mediaSettings($: EngineInterface): Promise<MediaSettings> {
+  try {
+    return { ...MEDIA_DEFAULTS, ...(((await $.store.get('media')) ?? {}) as Partial<MediaSettings>) }
+  } catch {
+    return { ...MEDIA_DEFAULTS }
+  }
+}
+
+/** The server's media support, asked again at most every 30 s while something is missing. */
+async function freshMediaStatus($: EngineInterface): Promise<MediaStatus> {
+  const complete = mediaStatus.pdf && mediaStatus.images && mediaStatus.faces
+  if (!complete && Date.now() - mediaCheckedAt > 30_000) await serverUp($)
+  return mediaStatus
+}
+
+async function mediaCall<T>($: EngineInterface, kind: string, body: unknown, ms: number): Promise<T> {
+  const res = await withTimeout(
+    $,
+    $.http.fetch(`${BASE}/media/${kind}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+    ms,
+  )
+  if (!res.ok) throw new Error(`${kind}: HTTP ${res.status}`)
+  return JSON.parse(res.text) as T
+}
+
+function droppedNote(): Block {
+  mediaDropped += 1
+  return { type: 'text', text: MEDIA_NOTE }
+}
+
+const holdsMedia = (b: Block) =>
+  isMedia(b) || (b.type === 'tool_result' && Array.isArray(b.content) && (b.content as Block[]).some(isMedia))
+
+/**
+ * Turns each image and PDF in a row into something that can be checked.
+ * Claude Code lets this hook drop or move an image, never change one, so:
+ * - a tool result of a Read that `tool.call` pointed at a redacted copy keeps
+ *   its image (already covered) and gets the image's masked text;
+ * - a PDF with text becomes its text, masked like any text;
+ * - any other image (pasted into the prompt, from another tool) is dropped,
+ *   and its text, masked, is sent in its place.
+ * What can't be checked is dropped with a note, so it never goes out as it was.
+ */
+async function prepareMedia($: EngineInterface, content: readonly Block[]): Promise<Block[]> {
+  if (!content.some(holdsMedia)) return content as Block[]
+  const settings = await mediaSettings($)
+  const status = await freshMediaStatus($)
+  const budget = { images: MAX_IMAGES_PER_ROW }
+  const one = async (b: Block): Promise<Block[]> => {
+    if (!isMedia(b) || checkedMedia.has(b)) return [b]
+    try {
+      return await convertMedia($, b, settings, status, budget)
+    } catch {
+      return [droppedNote()]
+    }
+  }
+  const out: Block[] = []
+  for (const b of content) {
+    const redirected = b.type === 'tool_result' && typeof b.tool_use_id === 'string' ? readCopies.get(b.tool_use_id) : undefined
+    if (redirected && Array.isArray(b.content)) {
+      // Claude Code read the redacted copy: its media is already covered.
+      for (const c of b.content as Block[]) if (isMedia(c)) checkedMedia.add(c)
+      out.push({ ...b, content: [...(b.content as Block[]), ...(redirected.text ? [{ type: 'text', text: redirected.text }] : [])] })
+      readCopies.delete(b.tool_use_id as string)
+    } else if (b.type === 'tool_result' && Array.isArray(b.content) && (b.content as Block[]).some(isMedia)) {
+      const inner: Block[] = []
+      for (const c of b.content as Block[]) inner.push(...(await one(c)))
+      out.push({ ...b, content: inner })
+    } else {
+      out.push(...(await one(b)))
+    }
+  }
+  return out
+}
+
+type PdfResult = { pages: string[]; page_count: number; scanned: boolean; truncated?: boolean; images: string[] }
+
+async function convertMedia(
+  $: EngineInterface, b: Block, s: MediaSettings, status: MediaStatus, budget: { images: number },
+): Promise<Block[]> {
+  const src = b.source as { type?: string; media_type?: string; data?: unknown } | undefined
+  if (b.type === 'document' && src?.type === 'text' && typeof src.data === 'string') return [{ type: 'text', text: src.data }]
+  if (src?.type !== 'base64' || typeof src.data !== 'string') return [droppedNote()]
+  if (b.type === 'document' && src.media_type === 'application/pdf') {
+    if (!s.pdf || !status.pdf) return [droppedNote()]
+    const render = s.images && !!status.images
+    const p = await mediaCall<PdfResult>($, 'pdf', { data: src.data, render, maxPages: budget.images }, 4000)
+    mediaStats.pdfs += 1
+    if (!p.scanned) return [{ type: 'text', text: pdfText(p, typeof b.title === 'string' ? b.title : undefined) }]
+    if (!p.images.length) return [droppedNote()]
+    const texts: string[] = []
+    for (const page of p.images) {
+      if (budget.images-- <= 0) break
+      texts.push((await readImage($, { data: page })).masked.join('\n'))
+    }
+    mediaDropped += 1
+    return [{ type: 'text', text: `${SCANNED_NOTE(p.page_count, texts.length)}\n${texts.map((t, i) => `--- page ${i + 1} ---\n${t}`).join('\n\n')}` }]
+  }
+  if (b.type === 'image') {
+    if (!s.images || !status.images || budget.images-- <= 0) return [droppedNote()]
+    const { masked } = await readImage($, { data: src.data })
+    mediaDropped += 1
+    return [{ type: 'text', text: masked.length ? `${PASTED_NOTE}\n${masked.join('\n')}` : PASTED_EMPTY }]
+  }
+  return [droppedNote()]
+}
+
+const PASTED_NOTE =
+  '[An image was here. Claude Code lets pii-mask cover personal data only in images Claude reads from a file, ' +
+  "so this one is left out. Its text, read by pii-mask with personal data replaced by placeholders:]"
+const PASTED_EMPTY =
+  '[An image was here. pii-mask found no text in it and left it out, since it can only cover images Claude reads ' +
+  'from a file. Ask the user to save it as a file and to tell you its path.]'
+const SCANNED_NOTE = (pages: number, read: number) =>
+  `[A scanned PDF, ${pages} page(s), was here and was left out. Its text${read < pages ? ` (first ${read} page(s))` : ''}, ` +
+  'read by pii-mask with personal data replaced by placeholders:]'
+
+/**
+ * Reads an image's text with OCR and works out where to cover it: the masked
+ * lines, and a box over each value masking replaced.
+ */
+async function readImage($: EngineInterface, input: { data: string } | { path: string }): Promise<{ masked: string[]; boxes: Box[] }> {
+  const { lines } = await mediaCall<{ lines: OcrLine[] }>($, 'ocr', input, 7000)
+  // OCR's own email shape first ("sofie lindqvist@example. dk"), then the text patterns, then OCR's looser numbers.
+  const [ocrEmail, ...ocrRest] = OCR_PATTERNS
+  const finds = lines.length ? await nerFind($, lines.map(l => l.text)) : []
+  const rules = [...(ocrEmail ? [ocrEmail] : []), ...PATTERNS, ...ocrRest, ...findRules(finds, vault)]
+  const boxes: Box[] = []
+  const masked: string[] = []
+  for (const line of lines) {
+    const m = mask(line.text, rules, vault)
+    masked.push(m)
+    if (m === line.text) continue
+    boxes.push(...spanBoxes(line, valueSpans(line.text, m, vault).map(v => ({ start: v.start, end: v.end, label: boxLabel(v.token) }))))
+  }
+  return { masked, boxes }
+}
+
+/* -------------------------------------------------- the Read tool, redirected */
+
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i
+const PDF_FILE = /\.pdf$/i
+/** Reads pointed at a redacted copy: by tool_use_id, the original path and the masked text to add. */
+const readCopies = new Map<string, { original: string; text: string }>()
+/** Redacted copy → the path Claude asked for, so the tool row shows the file you know. */
+const readCopiesShown = new Map<string, string>()
+let copySeq = 0
+
+/**
+ * When Claude reads an image file (or a scanned PDF), points the Read at a
+ * copy with the personal data covered and faces pixelated, so Claude Code
+ * itself sends the covered image. Returns the copy's path, or undefined to
+ * leave the call as it is (switched off, not installed, nothing to read): its
+ * media is then dropped by session.append as any unchecked media is.
+ */
+async function redactedCopy($: EngineInterface, path: string, toolUseId: string): Promise<string | undefined> {
+  if (engine.state !== 'ready' || !(IMAGE_FILE.test(path) || PDF_FILE.test(path))) return undefined
+  const s = await mediaSettings($)
+  const status = await freshMediaStatus($)
+  if (!s.images || !status.images) return undefined
+  const dir = await copiesDir($)
+  const name = `read-${Date.now()}-${copySeq++}`
+  if (IMAGE_FILE.test(path)) {
+    const { masked, boxes } = await readImage($, { path })
+    const out = `${dir}/${name}.png`
+    const red = await mediaCall<{ faces: number }>($, 'redact', { path, boxes, faces: s.faces && !!status.faces, out }, 4000)
+    count(boxes.length, red.faces)
+    readCopies.set(toolUseId, { original: path, text: s.imageText && masked.length ? imageText(masked) : '' })
+    return out
+  }
+  // A PDF: one with text is sent as its text by session.append; a scanned one is rebuilt from covered pages.
+  if (!s.pdf || !status.pdf) return undefined
+  const p = await mediaCall<PdfResult>($, 'pdf', { path, render: true, maxPages: MAX_IMAGES_PER_ROW }, 4000)
+  if (!p.scanned || !p.images.length) return undefined
+  const pages: string[] = []
+  const texts: string[] = []
+  for (const page of p.images) {
+    const { masked, boxes } = await readImage($, { data: page })
+    const red = await mediaCall<{ data: string; faces: number }>($, 'redact', { data: page, boxes, faces: s.faces && !!status.faces }, 4000)
+    count(boxes.length, red.faces)
+    pages.push(red.data)
+    texts.push(masked.join('\n'))
+  }
+  const out = `${dir}/${name}.pdf`
+  await mediaCall($, 'topdf', { images: pages, out }, 4000)
+  mediaStats.pdfs += 1
+  const more = p.page_count > pages.length ? ` Only its first ${pages.length} of ${p.page_count} pages are included.` : ''
+  readCopies.set(toolUseId, {
+    original: path,
+    text: s.imageText ? `[This scanned PDF was sent with personal data covered by pii-mask.${more} Its text, masked:]\n${texts.join('\n\n')}` : '',
+  })
+  return out
+}
+
+/**
+ * Where the covered copies go: inside the project, so Claude Code reads them
+ * without asking (it asks before reading outside the working folder), in a
+ * folder git ignores.
+ */
+async function copiesDir($: EngineInterface): Promise<string> {
+  const dir = `${await $.session.cwd()}/.claude/pii-mask`
+  try {
+    if (!(await $.fs.exists(`${dir}/.gitignore`))) await $.fs.write(`${dir}/.gitignore`, '# Copies pii-mask made with personal data covered, for Claude to read.\n*\n')
+  } catch {
+    // the copy is still written; git just isn't told to skip it
+  }
+  return dir
+}
+
+function count(boxes: number, faces: number): void {
+  mediaStats.images += 1
+  mediaStats.boxes += boxes
+  mediaStats.faces += faces
+}
+
+/** "PDFs on · images on · faces off · image text on", and what isn't installed. */
+async function mediaSummary($: EngineInterface): Promise<string> {
+  const s = await mediaSettings($)
+  const missing = [
+    !mediaStatus.pdf && 'PDF', !mediaStatus.images && 'image', !mediaStatus.faces && 'face',
+  ].filter(Boolean)
+  const on = (v: boolean) => (v ? 'on' : 'off')
+  const state = mediaInstall === 'running' ? ' (installing image and PDF support…)'
+    : mediaInstall === 'failed' && missing.length ? ` (image and PDF support couldn't be installed: ${mediaInstallError} /pii-mask media install tries again)`
+    : missing.length ? ` (${missing.join(', ')} support not installed)` : ''
+  return `PDFs ${on(s.pdf)} · images ${on(s.images)} · faces ${on(s.faces)} · image text ${on(s.imageText)}${state}`
+}
+
+/** `/pii-mask media [name] [on|off]`: shows or changes how images and PDFs are handled. */
+async function mediaCommand($: EngineInterface, args: string): Promise<string> {
+  const [name, value] = args.split(/\s+/).filter(Boolean)
+  const settings = await mediaSettings($)
+  if (name === 'install') {
+    void addMediaSupport($, true)
+    return 'Installing image and PDF support in the background. /pii-mask media shows when it is done.'
+  }
+  if (name !== undefined) {
+    const key = MEDIA_SWITCHES[name]
+    if (!key || (value !== 'on' && value !== 'off')) {
+      return `Use /pii-mask media <${Object.keys(MEDIA_SWITCHES).join('|')}> <on|off>, or /pii-mask media install.`
+    }
+    settings[key] = value === 'on'
+    await $.store.set('media', settings)
+  }
+  const lines = (Object.keys(MEDIA_SWITCHES) as string[]).map(n => {
+    const key = MEDIA_SWITCHES[n] as keyof MediaSettings
+    return `  ${n.padEnd(10)} ${settings[key] ? 'on ' : 'off'}  ${MEDIA_HELP[key]}`
+  })
+  return [
+    `${NAME}: images and PDFs. Switched off, or not installed, they are dropped instead of sent.`,
+    ...lines,
+    await mediaSummary($),
+    'Images as Claude got them (the last 20): .claude/pii-mask in the project.',
+    'Change one with /pii-mask media <name> on|off. It applies to every session.',
+  ].join('\n')
 }
 
 /* ------------------------------------------------------------- local copies */
@@ -704,7 +1058,8 @@ export const register: Register = on => {
     await ready($)
     if (engine.state === 'off') return next(e) // the install failed: nothing is masked
     const before = vault.size
-    const texts = textsOf(e.message.content)
+    const prepared = await prepareMedia($, e.message.content as Block[])
+    const texts = textsOf(prepared)
     // Claude's own replies skip the model: Claude only ever sees placeholders,
     // so what it writes holds no personal data it wasn't given, and the model
     // would only add false finds ("We") and delay. Patterns and every value
@@ -716,7 +1071,7 @@ export const register: Register = on => {
     // screen doesn't lose them right after installing.
     const own = (e.door === 'command' || e.door === 'notice') && engine.state !== 'ready'
     const rules = !texts.length ? [] : reply || own || isOwnRow(texts) ? [...PATTERNS, ...findRules([], vault)] : await rulesFor($, texts)
-    const content = maskContent(e.message.content, rules)
+    const content = maskContent(prepared, rules)
     await persist($, before)
     return next({ ...e, message: { ...e.message, content } })
   }).catch(($, e, next) =>
@@ -804,15 +1159,33 @@ export const register: Register = on => {
     next({ ...e, props: { ...e.props, text: unmask(e.props.text, vault) } }),
   ).catch(($, e, next) => (next.called ? undefined : next(e)))
 
-  on('ui.render', { component: 'ToolUse' }, async ($, e, next) =>
-    next(keepsPlaceholders(e.props.tool) ? e : { ...e, props: { ...e.props, input: unmaskDeep(e.props.input, vault) } }),
-  ).catch(($, e, next) => (next.called ? undefined : next(e)))
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    if (keepsPlaceholders(e.props.tool)) return next(e)
+    const input = unmaskDeep(e.props.input, vault) as { file_path?: unknown }
+    // A Read pointed at a redacted copy shows the file you asked for.
+    const original = [...readCopiesShown.entries()].find(([copy]) => copy === input.file_path)?.[1]
+    return next({ ...e, props: { ...e.props, input: original ? { ...input, file_path: original } : input } })
+  }).catch(($, e, next) => (next.called ? undefined : next(e)))
 
   // The model's tool calls: real values back in the arguments, except for
   // tools that would send them off this machine (web tools, every MCP tool).
   on('tool.call', async ($, e, next) => {
     await ready($)
-    return next(keepsPlaceholders(String(e.tool)) ? e : unmaskDeep(e, vault, TOOL_ENVELOPE))
+    const call = keepsPlaceholders(String(e.tool)) ? e : unmaskDeep(e, vault, TOOL_ENVELOPE)
+    if (e.tool === 'Read' && engine.state === 'ready') {
+      const path = String((call as { file_path?: unknown }).file_path ?? '')
+      let copy: string | undefined
+      try {
+        copy = await redactedCopy($, path, String(e.tool_use_id ?? ''))
+      } catch {
+        copy = undefined // left as it is: session.append drops the unchecked image
+      }
+      if (copy) {
+        readCopiesShown.set(copy, path)
+        return next({ ...call, file_path: copy } as typeof e)
+      }
+    }
+    return next(call)
   }).catch(($, e, next) =>
     next.called ? next(e) : { deny: `${NAME} could not restore the personal data in this call's arguments; retry it.` },
   )
@@ -890,8 +1263,8 @@ export const register: Register = on => {
     await reserveFromTranscript($)
     await $.command.register({
       name: 'pii-mask',
-      description: 'Open the pane listing everything pii-mask has masked; "status" prints it, "retry" restarts the model.',
-      argumentHint: '[status|retry]',
+      description: 'Open the pane listing everything pii-mask has masked; "status" prints it, "media" switches image and PDF handling, "retry" restarts the model.',
+      argumentHint: '[status|media [pdf|images|faces|image-text] [on|off]|retry]',
     })
     publishStatus($)
     return next(e)
@@ -907,8 +1280,9 @@ export const register: Register = on => {
       void startEngine($, true)
       return { text: own('Starting the local model again. The status line shows when it is ready.') }
     }
+    if (arg === 'media' || arg.startsWith('media ')) return { text: own(await mediaCommand($, arg.slice(5).trim())) }
     if (arg !== '' && arg !== 'status') {
-      return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, or /pii-mask retry.') }
+      return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, /pii-mask media, or /pii-mask retry.') }
     }
     if (arg === '') {
       const opened = await $.ui.open({ id: PANE, title: 'Masked by pii-mask' })
@@ -924,6 +1298,8 @@ export const register: Register = on => {
           `Model: ${engine.state}${engine.detail ? ` (${engine.detail})` : ''}, GLiNER PII on ${BASE}`,
           `Model calls: ${nerStats.calls} (${nerStats.calls ? Math.round(nerStats.ms / nerStats.calls) : 0} ms on average), failed: ${nerStats.failures}`,
           `Values masked: ${vault.size} (open /pii-mask to see them) · rows removed unchecked: ${rowsRemoved} · images/PDFs removed: ${mediaDropped}`,
+          `Images and PDFs: ${mediaStats.pdfs} PDF(s) sent as text, ${mediaStats.images} image(s) sent with ${mediaStats.boxes} box(es) and ${mediaStats.faces} face(s) covered · ${await mediaSummary($)}`,
+          `Images as Claude got them (the last 20): .claude/pii-mask in the project`,
           `Install log: ${dir}/setup.log`,
           `Server log: ${dir}/server.log`,
         ].join('\n'),
@@ -960,7 +1336,8 @@ export const register: Register = on => {
     const progress = engineLines(view, blocks.values().next().value)
     const marker = (await read($, markerAtom)) ?? ''
     const lines = paneLines(entries, marker)
-    const room = Math.max(3, (e.viewport?.rows ?? 30) - 5 - progress.length)
+    const mediaLine = await mediaSummary($)
+    const room = Math.max(3, (e.viewport?.rows ?? 30) - 6 - progress.length)
     const shown = lines.length > room ? lines.slice(0, room - 1) : lines
     return (
       <Box flexDirection="column">
@@ -970,6 +1347,7 @@ export const register: Register = on => {
             ? 'Nothing masked yet. Names, emails, phone numbers and other personal data appear here as they are found.'
             : `${entries.length} value${entries.length === 1 ? '' : 's'} masked. Claude sees the placeholder; the real value stays on this machine.`}
         </Text>
+        <Text dimColor wrap="truncate-end">{`Images and PDFs: ${mediaLine} (/pii-mask media)`}</Text>
         {shown.map(l =>
           l.kind === 'head' ? (
             <Text bold color="claude">{l.text}</Text>

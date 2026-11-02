@@ -15,6 +15,7 @@ API (JSON):
 """
 
 import argparse
+import base64
 import heapq
 import itertools
 import json
@@ -175,7 +176,7 @@ class Detector:
         return results
 
 
-def make_handler(backend, state):
+def make_handler(backend, state, media=None):
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # never log what was sent
@@ -192,12 +193,17 @@ def make_handler(backend, state):
         def do_GET(self):
             state["last"] = time.time()
             if self.path == "/health":
-                self.answer(200, {"app": "pii-mask", "ok": True, "model": backend.name})
+                body = {"app": "pii-mask", "ok": True, "model": backend.name}
+                if media is not None:
+                    body["media"] = media.status()
+                self.answer(200, body)
             else:
                 self.answer(404, {"error": "not found"})
 
         def do_POST(self):
             state["last"] = time.time()
+            if self.path.startswith("/media/"):
+                return self.media()
             if self.path != "/detect":
                 return self.answer(404, {"error": "not found"})
             length = int(self.headers.get("content-length") or 0)
@@ -215,7 +221,69 @@ def make_handler(backend, state):
             state["last"] = time.time()
             self.answer(200, {"results": results})
 
+        def media(self):
+            """POST /media/pdf {data, render?, maxPages?}, /media/ocr {data},
+            /media/redact {data, boxes, faces?}; data is base64 both ways."""
+            kind = self.path[len("/media/"):]
+            if media is None or kind not in ("pdf", "ocr", "redact", "topdf"):
+                return self.answer(404, {"error": "not found"})
+            need = {"pdf": "pdf", "ocr": "images", "redact": "images", "topdf": "pdf"}[kind]
+            status = media.status()
+            if not status.get(need) and not (kind == "redact" and status.get("faces")):
+                return self.answer(503, {"error": f"{need} support is not installed"})
+            length = int(self.headers.get("content-length") or 0)
+            if length > MAX_BODY:
+                return self.answer(413, {"error": "request too large"})
+            try:
+                req = json.loads(self.rfile.read(length))
+                # The file's bytes as base64, or the path of a file on this machine.
+                data = None if kind == "topdf" else (
+                    open(req["path"], "rb").read() if req.get("path") else base64.b64decode(req["data"]))
+                out_path = req.get("out")
+                if kind == "topdf":
+                    pdf = media.to_pdf([base64.b64decode(i) for i in req["images"]])
+                    write_file(out_path, pdf)
+                    out = {"out": out_path, "bytes": len(pdf)}
+                elif kind == "pdf":
+                    out = media.pdf(data, render=bool(req.get("render")), max_pages=int(req.get("maxPages", 5)))
+                    out["images"] = [base64.b64encode(i).decode() for i in out["images"]]
+                elif kind == "ocr":
+                    out = media.ocr(data)
+                else:
+                    out = media.redact(data, req.get("boxes") or [], blur_faces=bool(req.get("faces")) and status.get("faces"))
+                    if out_path:  # written where the caller asked (a copy for Claude Code's Read tool)
+                        write_file(out_path, out.pop("data"))
+                        out["out"] = out_path
+                    else:
+                        out["data"] = base64.b64encode(out["data"]).decode()
+            except (ValueError, KeyError, TypeError) as err:
+                return self.answer(400, {"error": str(err)})
+            except Exception as err:  # a file the libraries can't read
+                return self.answer(422, {"error": f"{type(err).__name__}: {err}"})
+            state["last"] = time.time()
+            self.answer(200, out)
+
     return Handler
+
+
+READ_COPIES_KEPT = 20
+
+
+def write_file(path, data):
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    tmp = path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+    # Copies made for Claude Code's Read tool: the newest few are kept, so you can see what Claude got.
+    if os.path.basename(path).startswith("read-"):
+        copies = sorted((f for f in os.listdir(folder) if f.startswith("read-")), key=lambda f: os.path.getmtime(os.path.join(folder, f)))
+        for old in copies[:-READ_COPIES_KEPT]:
+            try:
+                os.remove(os.path.join(folder, old))
+            except OSError:
+                pass
 
 
 class Server(ThreadingHTTPServer):
@@ -298,7 +366,12 @@ def main():
     started = time.time()
     backend = Detector(Fake(cache) if args.fake else Gliner(cache))
     backend.detect(["Warm-up: Anna Berg, anna@example.com."], ["person", "email"], 0.5)
-    server.RequestHandlerClass = make_handler(backend, state)
+    from media import Media
+
+    media = Media(cache)
+    if media.status()["images"]:
+        media.warm_up()  # the OCR model takes seconds to load; not on the first image's clock
+    server.RequestHandlerClass = make_handler(backend, state, media)
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pii-mask model server: {backend.name} ready in "
           f"{time.time() - started:.1f} s on 127.0.0.1:{args.port}", flush=True)
 

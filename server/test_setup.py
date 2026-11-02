@@ -10,11 +10,12 @@ class Plan(unittest.TestCase):
         p = plan("Darwin", "x86_64")
         self.assertEqual(p["python_max"], (3, 11))  # PyTorch 2.2's compiler doesn't run on 3.12
         self.assertIn("torch==2.2.2", p["torch"])
+        self.assertIn("torchvision==0.17.2", p["torch"])  # the torchvision built for PyTorch 2.2.2
         self.assertIn("numpy<2", p["torch"])
         self.assertTrue(any(x.startswith("transformers") and "<4.58" in x for x in p["extra"]))
 
     def test_apple_silicon_and_linux_take_the_latest(self):
-        self.assertEqual(plan("Darwin", "arm64")["torch"], ["torch"])
+        self.assertEqual(plan("Darwin", "arm64")["torch"], ["torch", "torchvision"])
         self.assertEqual(plan("Darwin", "arm64")["python_max"], None)
         self.assertTrue(plan("Linux", "x86_64")["cpu_index"])
 

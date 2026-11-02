@@ -10,6 +10,8 @@ const markerIn = (text: string) => /<<[A-Z][A-Z0-9_]*_\d+(?:-\d+)?\.([a-z0-9]{4}
 const CACHE = '/home/u/.cache/pii-mask'
 const WIN_CACHE = 'C:\\Users\\u\\AppData\\Local\\pii-mask'
 const TRANSCRIPT = '/home/u/.claude/projects/-proj/s1.jsonl'
+/** A 1×1 PNG: what the stand-in server answers for a redacted image. */
+const REDACTED_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
 const VAULT_FILE = '/home/u/.claude/projects/-proj/s1.pii-mask.json'
 
 type World = {
@@ -38,6 +40,10 @@ type World = {
   files?: Record<string, string>
   /** Starting the server does nothing (it crashes). */
   serverNeverStarts?: boolean
+  /** What the server's image and PDF support answers. */
+  media?: { ocr?: { lines: unknown[] }; pdf?: Record<string, unknown> }
+  /** The server has no image and PDF support (an install made before it). */
+  noMedia?: boolean
 }
 
 const FINDS: Record<string, string> = {
@@ -51,7 +57,7 @@ function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
   const cache = w.windows ? WIN_CACHE : CACHE
   const files: Record<string, string> = { ...(w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }), ...w.files }
-  const seen = { answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
+  const seen = { read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
   let up = w.up !== false
   const finds = w.finds ?? FINDS
 
@@ -65,6 +71,13 @@ function world(on: On, w: World = {}) {
     return { value: undefined }
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  // $.store, across sessions: the kit has none beneath the plugin.
+  const store: Record<string, unknown> = {}
+  on('store.get', ($, e) => ({ value: store[e.key] }) as never)
+  on('store.set', ($, e) => {
+    store[e.key] = JSON.parse(JSON.stringify(e.value))
+    return { value: undefined } as never
+  })
   on('ui.toast', () => ({ value: undefined }))
   // Claude Code's own row above the prompt, beneath pii-mask's panel.
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', props: {}, children: ['core row'] }) as never)
@@ -93,6 +106,11 @@ function world(on: On, w: World = {}) {
   })
   on('process.spawn', async function* ($, e) {
     seen.spawns.push([...e.argv])
+    if (e.argv.includes('--media')) {
+      seen.mediaAdded = true
+      yield { stream: 'stdout' as const, text: eol('STEP 1/2 installing image and PDF support\nDONE\n') }
+      return { value: { code: 0, signal: null } } as never
+    }
     yield { stream: 'stdout' as const, text: eol('STEP 1/4 creating a Python environment\nSTEP 2/4 installing PyTorch (the largest download)\nSIZE 412000000\n') }
     if (w.setupFails) {
       yield { stream: 'stdout' as const, text: eol(`${w.setupFails.fix ? `FIX ${w.setupFails.fix}\n` : ''}ERROR ${w.setupFails.reason}\n`) }
@@ -105,7 +123,20 @@ function world(on: On, w: World = {}) {
   const answer = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
   on('http.fetch', async ($, e) => {
     if (!up) return { deny: 'connect ECONNREFUSED 127.0.0.1:8766' }
-    if (e.url.endsWith('/health')) return answer({ app: 'pii-mask', ok: true, model: 'test' })
+    if (e.url.endsWith('/health')) {
+      const has = !w.noMedia || seen.mediaAdded
+      return answer({ app: 'pii-mask', ok: true, model: 'test', media: { pdf: has, images: has, faces: has } })
+    }
+    const media = /\/media\/(\w+)$/.exec(e.url)
+    if (media) {
+      const kind = media[1] ?? ''
+      const body = JSON.parse(e.init?.body ?? '{}') as Record<string, unknown>
+      seen.mediaCalls.push({ kind, body })
+      if (kind === 'ocr') return answer(w.media?.ocr ?? { width: 300, height: 40, lines: [] })
+      if (kind === 'pdf') return answer(w.media?.pdf ?? { pages: [], page_count: 0, scanned: true, images: [] })
+      if (kind === 'topdf') return answer({ out: body.out, bytes: 100 })
+      return answer(body.out ? { out: body.out, width: 300, height: 40, faces: 1 } : { data: REDACTED_PNG, width: 300, height: 40, faces: 1 })
+    }
     seen.detects += 1
     const { texts } = JSON.parse(e.init?.body ?? '{}') as { texts: string[] }
     if (w.slowMs) await clock.sleep(w.slowMs)
@@ -115,6 +146,12 @@ function world(on: On, w: World = {}) {
         findNow ? Object.entries(finds).filter(([v]) => t.includes(v)).map(([text, label]) => ({ text, label, score: 0.9 })) : [],
       ),
     })
+  })
+  // What the plugin passes down: what Claude Code stores and sends. (The row the
+  // test kit hands back leaves images out, as the stored transcript does.)
+  on('session.append', ($, e, next) => {
+    seen.appended.push(e.message.content)
+    return next(e)
   })
   on('classic.SessionStart', () => ({}))
   on('classic.UserPromptSubmit', () => ({}))
@@ -127,6 +164,7 @@ function world(on: On, w: World = {}) {
   on('tool.call', ($, e) => {
     if (e.tool === 'Bash') seen.ran = e.command
     if (e.tool === 'WebSearch') seen.ran = e.query
+    if (e.tool === 'Read') seen.read = String((e as { file_path?: unknown }).file_path)
     return { result: { stdout: 'ok', stderr: '', interrupted: false } } as never
   })
   on('prompt.compose', () => ({ sections: w.sections ?? [] }))
@@ -253,8 +291,8 @@ describe('masking with the model', () => {
     expect(await row('ToolUse', web)).toContain(`${p} news`)
   })
 
-  test('images are removed before they are stored or sent', async ($, on) => {
-    world(on)
+  test('without image support, images are removed before they are stored or sent', async ($, on) => {
+    world(on, { noMedia: true })
     const stored = await $.session.append({
       message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'see' }, { type: 'image', source: {} }] },
       door: 'prompt',
@@ -572,5 +610,132 @@ describe('the panel above the prompt', () => {
     const ui = await mountBand($)
     expect(JSON.stringify(await ui.drawn())).not.toContain('pii-mask')
     await ui.unmount()
+  })
+})
+
+describe('images and PDFs', () => {
+  /** Another valid PNG, the one the user sent. */
+  const ORIGINAL_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP8z8Dwn4GBgYGJAQoAKBkC/0iBNMwAAAAASUVORK5CYII='
+  const start = ($: Engine) => appendPrompt($, 'hello', 'u0')
+  const word = (text: string, x: number, at: number) => ({ text, box: [x, 0, x + text.length * 10, 20], start: at })
+  const OCR = { width: 300, height: 40, lines: [{ text: 'Customer: Lars Holm', words: [word('Customer:', 0, 0), word('Lars', 100, 10), word('Holm', 145, 15)] }] }
+  const readResult = (id: string, block: object) => ({
+    message: { type: 'user', role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: [block] }] },
+    door: 'tool-result', origin: { kind: 'tool', tool: 'Read' }, uuid: `r-${id}`,
+  })
+  const image = (data = ORIGINAL_PNG) => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data } })
+
+  test('Claude reading an image file gets a copy with each name covered and faces pixelated, plus its masked text', async ($, on) => {
+    const { seen } = world(on, { media: { ocr: OCR } })
+    await start($)
+    await $.tool.call({ tool: 'Read', file_path: '/proj/card.png', tool_use_id: 't9' } as never)
+    expect(seen.read).toMatch(/^\/proj\/\.claude\/pii-mask\/read-.*\.png$/)
+    const redact = seen.mediaCalls.find(c => c.kind === 'redact')?.body
+    expect(redact).toMatchObject({ path: '/proj/card.png', out: seen.read, faces: true, boxes: [{ box: [100, 0, 185, 20], label: 'PERSON_1' }] })
+    expect(seen.writes['/proj/.claude/pii-mask/.gitignore']).toContain('*')
+    // The tool result Claude Code builds from the copy keeps its image, and gets the text.
+    await $.session.append(readResult('t9', image(REDACTED_PNG)) as never)
+    const inner = (seen.appended.at(-1) as { content: { type: string; text?: string }[] }[])[0]?.content ?? []
+    expect(inner.map(b => b.type)).toEqual(['image', 'text'])
+    expect(inner[1]?.text).toContain('Customer: <<PERSON_1.')
+    expect(JSON.stringify(inner)).not.toContain('Lars')
+  })
+
+  test('an email OCR split in two is covered whole', async ($, on) => {
+    const line = 'Mail: anna berg@example. dk'
+    const ocr = { width: 400, height: 40, lines: [{ text: line, words: [word('Mail:', 0, 0), word('anna', 60, 6), word('berg@example.', 110, 11), word('dk', 250, 25)] }] }
+    const { seen } = world(on, { media: { ocr } })
+    await start($)
+    await $.tool.call({ tool: 'Read', file_path: '/proj/shot.png', tool_use_id: 't1' } as never)
+    const boxes = seen.mediaCalls.find(c => c.kind === 'redact')?.body.boxes as { box: number[]; label: string }[]
+    expect(boxes).toHaveLength(1)
+    expect(boxes[0]?.label).toBe('EMAIL_1')
+    expect([boxes[0]?.box[0], boxes[0]?.box[2]]).toEqual([60, 270])
+  })
+
+  test('an image pasted into the prompt is left out, and its masked text is sent in its place', async ($, on) => {
+    const { seen } = world(on, { media: { ocr: OCR } })
+    await $.session.append({
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'see this' }, image()] },
+      door: 'prompt', origin: { kind: 'user' }, uuid: 'm1',
+    } as never)
+    const content = seen.appended.at(-1) as { type: string; text?: string }[]
+    expect(content.map(b => b.type)).toEqual(['text', 'text'])
+    expect(content[1]?.text).toContain('cover personal data only in images Claude reads from a file')
+    expect(content[1]?.text).toContain('Customer: <<PERSON_1.')
+    expect(JSON.stringify(content)).not.toContain('Lars')
+    expect(seen.mediaCalls.some(c => c.kind === 'redact')).toBe(false)
+  })
+
+  test('a PDF with text is sent as its masked text, and its Read is left as it is', async ($, on) => {
+    const { seen } = world(on, { media: { pdf: { pages: ['Invoice for Lars Holm', 'Total 100'], page_count: 2, scanned: false, images: [] } } })
+    await start($)
+    await $.tool.call({ tool: 'Read', file_path: '/proj/invoice.pdf', tool_use_id: 't2' } as never)
+    expect(seen.read).toBe('/proj/invoice.pdf')
+    await $.session.append(readResult('t2', { type: 'document', title: 'invoice.pdf', source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' } }) as never)
+    const text = JSON.stringify(seen.appended.at(-1))
+    expect(text).toContain('[PDF \\"invoice.pdf\\", 2 pages')
+    expect(text).toContain('--- page 2 ---')
+    expect(text).toContain('Invoice for <<PERSON_1.')
+    expect(text).not.toContain('Lars')
+    expect(text).not.toContain('"document"')
+  })
+
+  test('Claude reading a scanned PDF gets one rebuilt from covered pages', async ($, on) => {
+    const { seen } = world(on, { media: { ocr: OCR, pdf: { pages: [''], page_count: 3, scanned: true, images: [ORIGINAL_PNG, REDACTED_PNG] } } })
+    await start($)
+    await $.tool.call({ tool: 'Read', file_path: '/proj/scan.pdf', tool_use_id: 't3' } as never)
+    expect(seen.read).toMatch(/^\/proj\/\.claude\/pii-mask\/read-.*\.pdf$/)
+    expect(seen.mediaCalls.filter(c => c.kind === 'redact')).toHaveLength(2)
+    expect(seen.mediaCalls.find(c => c.kind === 'topdf')?.body.out).toBe(seen.read)
+    await $.session.append(readResult('t3', { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' } }) as never)
+    const inner = (seen.appended.at(-1) as { content: { type: string; text?: string }[] }[])[0]?.content ?? []
+    expect(inner.map(b => b.type)).toEqual(['document', 'text'])
+    expect(inner[1]?.text).toContain('first 2 of 3 pages')
+  })
+
+  test('switched off, an image file is read as it is and its image is dropped with a note; the switch is kept', async ($, on) => {
+    const { seen } = world(on, { media: { ocr: OCR } })
+    await start($)
+    const out = await $.command.run({ command: 'pii-mask', args: 'media images off' } as never) as { text: string }
+    expect(out.text).toMatch(/images\s+off/)
+    const again = await $.command.run({ command: 'pii-mask', args: 'media' } as never) as { text: string }
+    expect(again.text).toMatch(/images\s+off/)
+    expect(again.text).toMatch(/pdf\s+on/)
+    await $.tool.call({ tool: 'Read', file_path: '/proj/card.png', tool_use_id: 't4' } as never)
+    expect(seen.read).toBe('/proj/card.png')
+    await $.session.append(readResult('t4', image()) as never)
+    const text = JSON.stringify(seen.appended.at(-1))
+    expect(text).toContain('removed an image or PDF')
+    expect(text).not.toContain('"image"')
+    expect(seen.mediaCalls).toHaveLength(0)
+  })
+
+  test('faces off: names are covered but faces are left as they are', async ($, on) => {
+    const { seen } = world(on, { media: { ocr: OCR } })
+    await start($)
+    await $.command.run({ command: 'pii-mask', args: 'media faces off' } as never)
+    await $.tool.call({ tool: 'Read', file_path: '/proj/card.png', tool_use_id: 't5' } as never)
+    expect(seen.mediaCalls.find(c => c.kind === 'redact')?.body.faces).toBe(false)
+  })
+
+  test('without image support installed, an image is dropped as before', async ($, on) => {
+    const { seen } = world(on, { noMedia: true, up: false })
+    const stored = await $.session.append({
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'see this' }, image()] },
+      door: 'prompt', origin: { kind: 'user' }, uuid: 'm2',
+    } as never)
+    expect(JSON.stringify(stored.message?.content)).toContain('removed an image or PDF')
+    expect(seen.mediaCalls).toHaveLength(0)
+  })
+
+  test('an install made before image support gets it added in the background', async ($, on) => {
+    const { seen, clock } = world(on, { noMedia: true, up: false })
+    await appendPrompt($, 'hello')
+    await clock.advance(2000)
+    const add = seen.spawns.find(a => a.includes('--media'))
+    expect(add?.slice(-3)).toEqual(['--cache', CACHE, '--media'])
+    const out = await $.command.run({ command: 'pii-mask', args: 'media' } as never) as { text: string }
+    expect(out.text).toContain('PDFs on · images on · faces on · image text on\n')
   })
 })

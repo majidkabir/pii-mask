@@ -42,7 +42,15 @@ CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 # GLiNER is imported ("Dynamo is not supported on Python 3.12+"), so these Macs
 # need Python 3.11 or older. It was built against numpy 1, and transformers
 # 4.57 is the newest release checked to accept PyTorch 2.2.
-INTEL_MAC_TORCH = ["torch==2.2.2", "numpy<2"]
+INTEL_MAC_TORCH = ["torch==2.2.2", "torchvision==0.17.2", "numpy<2"]
+
+# Images and PDFs (optional: if these fail, text is still masked and images are
+# dropped as before). EasyOCR reads text in images with PyTorch, which GLiNER
+# already needs; pypdf reads a PDF's text, pypdfium2 renders scanned pages.
+MEDIA = ["easyocr", "pypdf", "pypdfium2"]
+OCR_LANGS = ["en", "da", "no", "sv", "de", "nl", "fr", "es", "it", "pt", "pl"]
+YUNET = "face_detection_yunet_2023mar.onnx"
+YUNET_URL = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/" + YUNET
 INTEL_MAC_EXTRA = ["transformers>=4.51.3,<4.58", "numpy<2"]
 
 
@@ -158,7 +166,7 @@ def plan(system, machine):
     PyTorch packages, and anything GLiNER's dependencies must be held to."""
     if is_intel_mac(system, machine):
         return {"python_max": (3, 11), "torch": INTEL_MAC_TORCH, "extra": INTEL_MAC_EXTRA, "cpu_index": False}
-    return {"python_max": None, "torch": ["torch"], "extra": [], "cpu_index": system == "Linux"}
+    return {"python_max": None, "torch": ["torch", "torchvision"], "extra": [], "cpu_index": system == "Linux"}
 
 
 def pick_python(python_max, which=shutil.which, current=None):
@@ -193,6 +201,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--cache", required=True, help="the folder to install into")
     p.add_argument("--fake", action="store_true", help="tests only: skip the install and use the fake model")
+    p.add_argument("--media", action="store_true", help="add image and PDF support to an install made before it")
     args = p.parse_args()
 
     cache = os.path.abspath(os.path.expanduser(args.cache))
@@ -237,6 +246,66 @@ def main():
 
     how = plan(platform.system(), platform.machine())
     log.write(f"plan: {how}\n")
+
+    def pip(packages, what, index=None):
+        run([py, "-m", "pip", "install", "--quiet", *packages, *(["--index-url", index] if index else [])], what)
+
+    def install_media():
+        """torchvision (from the same place as PyTorch), the image and PDF libraries, PyTorch held where it is."""
+        version = subprocess.run([py, "-c", "import torch; print(torch.__version__.split('+')[0])"],
+                                 capture_output=True, text=True).stdout.strip()
+        hold = [f"torch=={version}"] if version else []
+        vision = [x for x in how["torch"] if x.startswith("torchvision")] or ["torchvision"]
+        if subprocess.run([py, "-c", "import torchvision"], stdout=log, stderr=subprocess.STDOUT).returncode != 0:
+            done = False
+            if how["cpu_index"]:
+                try:
+                    pip([*vision, *hold], "installing torchvision (CPU)", CPU_TORCH_INDEX)
+                    done = True
+                except RuntimeError:
+                    log.write("CPU index not reachable; using the default torchvision package\n")
+            if not done:
+                pip([*vision, *hold], "installing torchvision")
+        pip([*MEDIA, *hold, *how["extra"]], "installing the image and PDF tools")
+
+    def fetch_media_models():
+        models = os.path.join(cache, "models")
+        code = (
+            "import os, urllib.request, easyocr\n"
+            f"d = {models!r}\n"
+            "os.makedirs(d, exist_ok=True)\n"
+            f"easyocr.Reader({OCR_LANGS!r}, gpu=False, model_storage_directory=os.path.join(d, 'easyocr'), download_enabled=True, verbose=False)\n"
+            f"p = os.path.join(d, {YUNET!r})\n"
+            "if not os.path.exists(p) or os.path.getsize(p) < 100000:\n"
+            f"    urllib.request.urlretrieve({YUNET_URL!r}, p + '.part')\n"
+            "    os.replace(p + '.part', p)\n"
+        )
+        run([py, "-c", code], "downloading the OCR and face models")
+
+    if args.media:
+        # An install made before images and PDFs were supported: add them.
+        try:
+            if not os.path.exists(py):
+                raise RuntimeError("pii-mask's model is not installed yet.")
+            say("STEP 1/2 installing image and PDF support")
+            install_media()
+            say("STEP 2/2 downloading the OCR and face models")
+            fetch_media_models()
+        except RuntimeError as err:
+            stop.set()
+            say(f"ERROR {err}")
+            return 1
+        stop.set()
+        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            data = json.load(open(marker, encoding="utf-8"))
+        except Exception:
+            data = {"model": MODEL}
+        write_marker(marker, dict(data, media=True))
+        say("DONE")
+        return 0
+
+    media_error = ""
     try:
         say("STEP 1/4 creating a Python environment")
         base = pick_python(how["python_max"])
@@ -267,11 +336,22 @@ def main():
             if not installed:
                 run([py, "-m", "pip", "install", "--quiet", *how["torch"]], "installing PyTorch")
 
-        say("STEP 3/4 installing GLiNER")
+        say("STEP 3/4 installing GLiNER and the image tools")
         run([py, "-m", "pip", "install", "--quiet", GLINER, *TOKENIZER, TRANSFORMERS_CAP, *how["extra"]], "installing GLiNER")
+        try:
+            install_media()
+        except RuntimeError as err:
+            media_error = str(err)  # text masking works without it; images are dropped as before
+            log.write(f"image and PDF support left out: {err}\n")
 
         say("STEP 4/4 downloading the PII model")
         run([py, "-c", f"from gliner import GLiNER; GLiNER.from_pretrained({MODEL!r})"], "downloading the model")
+        if not media_error:
+            try:
+                fetch_media_models()
+            except RuntimeError as err:
+                media_error = str(err)
+                log.write(f"image and PDF support left out: {err}\n")
     except RuntimeError as err:
         stop.set()
         fix = fix_for(str(err), platform.system(), py)
@@ -283,7 +363,8 @@ def main():
     shutil.rmtree(tmp, ignore_errors=True)
     say(f"SIZE {max(0, folder_size(cache) - baseline)}")
 
-    write_marker(marker, {"model": MODEL, "python": platform.python_version()})
+    write_marker(marker, {"model": MODEL, "python": platform.python_version(), "media": not media_error,
+                          **({"media_error": media_error} if media_error else {})})
     say("DONE")
     return 0
 

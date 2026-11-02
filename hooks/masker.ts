@@ -113,6 +113,10 @@ const NOT_NAMES = new Set(
   ('i me my mine we us our ours you your yours he him his she her hers they them their theirs it its ' +
     'the a an and or of to name names client clients customer customers user users team sir madam dear ' +
     'hi hello hey regards thanks mr mrs ms miss dr prof ' +
+    // job titles and departments ("Account manager" on a business card)
+    'account accounts manager managers director head lead senior junior chief officer ceo cto cfo coo founder owner ' +
+    'sales support service services engineer developer designer consultant assistant analyst admin administrator ' +
+    'department office contact marketing finance hr operations product project ' +
     'jeg mig min mit mine vi os vores du dig din dit dine han hun hans hendes de dem deres kære hej kunde ' +
     'jag mitt oss vår våra dina hon henne kund hei meg deg ' +
     'ich mich mein meine wir uns unser sie ihr ihre er ihn sein liebe lieber hallo herr frau')
@@ -385,6 +389,31 @@ function outsidePlaceholders(text: string, fn: (plain: string) => string): strin
 }
 
 /** Replaces every value the rules find with its placeholder. */
+/**
+ * Where the values `mask` replaced sit in the original text: for each
+ * placeholder in `masked`, every place its value occurs in `original` (as
+ * masking matches it: any case, any run of whitespace). Used to draw boxes
+ * over the words in an image.
+ */
+export function valueSpans(original: string, masked: string, vault: Vault): { start: number; end: number; token: string }[] {
+  const out: { start: number; end: number; token: string }[] = []
+  const seen = new Set<string>()
+  for (const m of masked.matchAll(PLACEHOLDER)) {
+    const token = m[1] ?? ''
+    if (seen.has(token)) continue
+    seen.add(token)
+    const value = vault.resolve(token, m[2] ?? '')
+    if (!value) continue
+    const re = new RegExp(value.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'giu')
+    for (const hit of original.matchAll(re)) {
+      const start = hit.index ?? 0
+      const end = start + hit[0].length
+      if (!out.some(o => o.start === start && o.end === end)) out.push({ start, end, token })
+    }
+  }
+  return out.sort((a, b) => a.start - b.start)
+}
+
 export function mask(text: string, rules: readonly Rule[], vault: Vault): string {
   let result = text
   for (const rule of rules) {

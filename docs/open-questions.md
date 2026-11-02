@@ -70,7 +70,8 @@ There, Claude Code's built-in guard runs before plugins a person installs, and s
 - `claude --safe-mode` and `--bare` start without any mods.
 - Bash gets real values; a command that sends data somewhere itself (`curl` to an outside API) sends them too.
 - Masking hides values, not context: a job title, a town or a story can still identify a person.
-- Images and PDFs are dropped, not masked.
+- Images pasted into a prompt can't be covered (Claude Code doesn't let plugins replace them), so they are dropped and their masked text sent; images read from a file are covered (see [how it works](how-it-works.md#8-images-and-pdfs)).
+- OCR misreads text. A name it misreads is masked in the text Claude gets but may not be covered in the image if the box can't be placed; long numbers and anything with an `@` are covered whatever they are. Handwriting is mostly not read.
 
 ### 8. Windows
 

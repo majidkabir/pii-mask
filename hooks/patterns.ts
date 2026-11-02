@@ -189,3 +189,17 @@ export const PATTERNS: readonly PatternRule[] = [
   whole('phone number (national)', 'PHONE',
     /\(\d{3}\)\s?\d{3}-\d{4}\b|\b\d{3}-\d{3}-\d{4}\b|\b0\d{1,4}[\s-]\d{3,4}[\s-]?\d{3,4}\b|(?<!\d )\b\d{2} \d{2} \d{2} \d{2}\b(?! \d)|\b07\d{3}\s?\d{6}\b/g),
 ]
+
+/**
+ * Looser shapes for text read out of an image. OCR splits and misreads: an
+ * email comes back as "sofie lindqvist@example. dk", an IBAN as "DK5O00...".
+ * In an image a miss sends the pixels, while a box too many costs Claude only
+ * a word, so these catch the shape without the checks the text patterns make.
+ */
+export const OCR_PATTERNS: readonly PatternRule[] = [
+  whole('email (OCR)', 'EMAIL', /(?<![\w.+-])(?:[A-Za-z0-9._%+-]+ ?){1,2}@ ?[A-Za-z0-9-]+(?: ?\. ?[A-Za-z0-9-]+)*/g,
+    v => /@ ?[A-Za-z0-9-]+ ?\. ?[A-Za-z]{2,}/.test(v)),
+  whole('IBAN (OCR)', 'IBAN', /\b[A-Z]{2}[0-9OIl]{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g),
+  // Any long number: phone, account, ID, card, read with O, I or l for a digit.
+  whole('long number (OCR)', 'NUMBER', /(?<![\w])\+?(?:[0-9OIl][ .\-/]?){5,}[0-9OIl](?![\w])/g, v => digitsOf(v).length >= 5),
+]

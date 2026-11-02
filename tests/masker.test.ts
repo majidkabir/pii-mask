@@ -58,7 +58,7 @@ describe('finds', () => {
     expect(looksLikeName('NerSettings')).toBe(false)
     expect(looksLikeName('x = 1')).toBe(false)
     // Pronouns, greetings and roles the model sometimes tags as people.
-    for (const w of ['We', 'You', 'Your name', 'Dear', 'Hi', 'Vi', 'Kære', 'Wir']) expect([w, looksLikeName(w)]).toEqual([w, false])
+    for (const w of ['We', 'You', 'Your name', 'Dear', 'Hi', 'Vi', 'Kære', 'Wir', 'Account manager', 'Sales Director', 'Customer Service']) expect([w, looksLikeName(w)]).toEqual([w, false])
     expect(looksLikeName('Sofie')).toBe(true)
     for (const w of ['Claude', 'Claude Sonnet', 'Claude Opus 5.5', 'Claude Code']) expect([w, looksLikeName(w)]).toEqual([w, false])
     expect(looksLikeName('Claudia Berg')).toBe(true)

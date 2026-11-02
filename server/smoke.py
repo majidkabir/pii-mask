@@ -11,6 +11,7 @@ start returns at once. Works on macOS, Linux and Windows.
 """
 
 import argparse
+import base64
 import json
 import os
 import subprocess
@@ -108,11 +109,86 @@ def main():
     if again.returncode != 0 or time.time() - t > 15:
         fail(f"a second start did not exit quietly ({again.returncode}, {again.stderr.strip()})", cache)
     print("second start exited quietly")
+
+    media_note = ""
+    if not args.fake:
+        media = health.get("media") or {}
+        print(f"media support: {media}")
+        if not all(media.get(k) for k in ("pdf", "images", "faces")):
+            fail(f"image and PDF support is missing: {media}", cache)
+        media_note = check_media(cache, python)
     print("OK")
     if os.environ.get("GITHUB_ACTIONS"):
         labels_found = ", ".join(sorted({f["label"] for f in found}))
         print(f"::notice title=smoke test::{health.get('model')}: setup {timings['setup']:.0f} s, "
-              f"start {timings['start']:.0f} s, detect {timings['detect']:.2f} s; found {labels_found}")
+              f"start {timings['start']:.0f} s, detect {timings['detect']:.2f} s; found {labels_found}{media_note}")
+
+
+SAMPLE = '''
+import io, sys
+from PIL import Image, ImageDraw, ImageFont
+img = Image.new("RGB", (900, 200), "white")
+d = ImageDraw.Draw(img)
+try:
+    f = ImageFont.load_default(size=30)
+except TypeError:
+    f = ImageFont.load_default()
+d.text((30, 30), "Customer: Sofie Lindqvist", fill="black", font=f)
+d.text((30, 110), "Mail: sofie" + "@" + "example.dk", fill="black", font=f)
+img.save(sys.argv[1])
+'''
+
+
+def text_pdf(lines):
+    content = "BT /F1 14 Tf 72 720 Td 18 TL " + " ".join(f"({l}) Tj T*" for l in lines) + " ET"
+    objs = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+            f"<< /Length {len(content)} >>\nstream\n{content}\nendstream", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for i, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n{o}\nendobj\n".encode("latin-1")
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode() + b"".join(f"{o:010d} 00000 n \n".encode() for o in offsets)
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return out
+
+
+def check_media(cache, python):
+    """A PDF's text, the text and words in an image, and a redacted image, from the real libraries."""
+    b64 = lambda data: base64.b64encode(data).decode()
+    t = time.time()
+    pdf = get("/media/pdf", json.dumps({"data": b64(text_pdf(["Invoice for Anna Berg", "Total 100"]))}).encode(), timeout=60)
+    t_pdf = time.time() - t
+    if pdf.get("scanned") or "Anna Berg" not in "".join(pdf.get("pages", [])):
+        fail(f"the PDF's text was not read: {pdf}", cache)
+    sample = os.path.join(cache, "smoke-sample.png")
+    subprocess.run([python, "-c", SAMPLE, sample], check=True)
+    image = open(sample, "rb").read()
+    t = time.time()
+    ocr = None
+    for _ in range(3):  # the OCR model may still be loading in the background
+        try:
+            ocr = get("/media/ocr", json.dumps({"data": b64(image)}).encode(), timeout=120)
+            break
+        except OSError:
+            time.sleep(5)
+    t_ocr = time.time() - t
+    text = "\n".join(l["text"] for l in (ocr or {}).get("lines", []))
+    print(f"OCR in {t_ocr:.1f} s: {text!r}")
+    if "Lindqvist" not in text or "@" not in text:
+        fail(f"OCR did not read the sample: {text!r}", cache)
+    words = [w for l in ocr["lines"] for w in l["words"]]
+    box = next(w["box"] for w in words if "Lindqvist" in w["text"])
+    t = time.time()
+    red = get("/media/redact", json.dumps({"data": b64(image), "boxes": [{"box": box, "label": "PERSON_1"}], "faces": True}).encode(), timeout=60)
+    t_red = time.time() - t
+    if not base64.b64decode(red["data"]).startswith(b"\x89PNG"):
+        fail("the redacted image is not a PNG", cache)
+    print(f"media: pdf {t_pdf:.2f} s, ocr {t_ocr:.1f} s, redact {t_red:.2f} s")
+    return f"; pdf {t_pdf:.2f} s, ocr {t_ocr:.1f} s, redact {t_red:.2f} s"
+
 
 
 if __name__ == "__main__":
