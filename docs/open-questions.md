@@ -30,6 +30,8 @@ Since 0.5.0, [real-model.yml](../.github/workflows/real-model.yml) runs the real
 | Apple silicon (macos-latest) | 3.12 | 97 s | 31 s | 0.64 s | person, email, address |
 | Intel Mac (macos-15-intel) | 3.11 | 148 s | 21 s | 1.54 s | person, email, address |
 
+Since 0.7.0 the same run checks images and PDFs: a PDF's text (under 0.01 s everywhere), OCR of a small image (2.2–4.7 s; 9.3 s on Apple silicon, where the OCR model was still loading after start), and drawing the boxes (under 0.1 s). The first image after the model server starts can take longer than the 7 s OCR limit while the OCR model loads; it is then left out, and the next one works.
+
 Install times are on fast data-centre connections; at home the 1.5–2.5 GB download decides. Still to measure: how well it finds personal data across real text, and speed on long tool results ([#3](#3-speed-on-big-tool-results)).
 
 ### 2. Misses go out as written
