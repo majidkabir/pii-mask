@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, TurnStepChunk } from 'claude-code'
+import { newerVersion } from '../hooks/version'
 
 /** Builds a placeholder at run time, so no literal token sits in this file. */
 const ph = (label: string, n: number | string, marker: string) => `<<${label}_${n}.${marker}>>`
@@ -46,6 +47,9 @@ type World = {
   media?: { ocr?: { lines: unknown[] }; pdf?: Record<string, unknown> }
   /** The server has no image and PDF support (an install made before it). */
   noMedia?: boolean
+  /** This mod's version (its plugin.json), and the version the running server says it came with. */
+  pluginVersion?: string
+  serverVersion?: string
 }
 
 const FINDS: Record<string, string> = {
@@ -59,8 +63,9 @@ function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
   const cache = w.windows ? WIN_CACHE : CACHE
   const files: Record<string, string> = { ...(w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }), ...w.files }
-  const seen = { read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
+  const seen = { stopped: 0, read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
   let up = w.up !== false
+  let serverVersion = w.serverVersion
   const finds = w.finds ?? FINDS
 
   mock.env(on, w.windows ? { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u', LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' } : { HOME: '/home/u' })
@@ -90,7 +95,10 @@ function world(on: On, w: World = {}) {
   // On a Windows host the test kit hands paths over in Windows form (C:\\home\\u\\...): match either form.
   const posix = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
   const keyOf = (p: string) => Object.keys(files).find(k => posix(k) === posix(p)) ?? p
-  on('fs.read', ($, e) => (files[keyOf(e.path)] === undefined ? { deny: `ENOENT: ${e.path}` } : { value: files[keyOf(e.path)] }))
+  on('fs.read', ($, e) => {
+    if (w.pluginVersion && posix(e.path).endsWith('/.claude-plugin/plugin.json')) return { value: JSON.stringify({ version: w.pluginVersion }) }
+    return files[keyOf(e.path)] === undefined ? { deny: `ENOENT: ${e.path}` } : { value: files[keyOf(e.path)] }
+  })
   on('fs.exists', ($, e) => ({ value: keyOf(e.path) in files }))
   on('fs.write', ($, e) => {
     seen.writes[e.path] = e.text
@@ -103,7 +111,14 @@ function world(on: On, w: World = {}) {
     if (e.argv.includes('-c')) {
       return w.noPython ? { deny: 'ENOENT' } : { value: { exitCode: 0, stdout: 'True\n', stderr: '' } as never }
     }
-    if (e.argv.some(a => a.endsWith('server/server.py')) && !w.serverNeverStarts) up = true
+    if (e.argv.some(a => a.endsWith('server/server.py')) && !w.serverNeverStarts) {
+      up = true
+      serverVersion = w.pluginVersion
+    }
+    if (e.argv[0] === 'pkill' || e.argv[0] === 'powershell') {
+      seen.stopped += 1
+      up = false
+    }
     return { value: { exitCode: 0, stdout: '', stderr: '' } as never }
   })
   on('process.spawn', async function* ($, e) {
@@ -127,7 +142,12 @@ function world(on: On, w: World = {}) {
     if (!up) return { deny: 'connect ECONNREFUSED 127.0.0.1:8766' }
     if (e.url.endsWith('/health')) {
       const has = !w.noMedia || seen.mediaAdded
-      return answer({ app: 'pii-mask', ok: true, model: 'test', media: { pdf: has, images: has, faces: has } })
+      return answer({ app: 'pii-mask', ok: true, model: 'test', version: serverVersion, media: { pdf: has, images: has, faces: has } })
+    }
+    if (e.url.endsWith('/stop')) {
+      seen.stopped += 1
+      up = false
+      return answer({ stopping: true })
     }
     const media = /\/media\/(\w+)$/.exec(e.url)
     if (media) {
@@ -358,6 +378,27 @@ describe('the local model\'s life cycle', () => {
     const start = seen.runs.find(r => r.some(a => a.endsWith('server/server.py')))
     expect(start?.[0]).toBe(`${CACHE}/venv/bin/python`)
     expect(start).toContain('--daemon')
+  })
+
+  test('a server from an older version (none said before 0.7.2) is stopped and this version starts its own', async ($, on) => {
+    const { seen, clock } = world(on, { pluginVersion: '0.7.2' })
+    const pending = appendPrompt($, 'Write to Lars Holm')
+    await clock.advance(3000)
+    expect(JSON.stringify((await pending).message?.content)).toContain('PERSON_1')
+    expect(seen.runs.find(r => r[0] === 'pkill')).toBeDefined()
+    expect(seen.runs.some(r => r.some(a => a.endsWith('server/server.py')))).toBe(true)
+  })
+
+  test('a server that says an older version is asked to stop; the same or a newer one is kept', async ($, on) => {
+    const { seen, clock } = world(on, { pluginVersion: '0.7.10', serverVersion: '0.7.9' })
+    const pending = appendPrompt($, 'Write to Lars Holm')
+    await clock.advance(3000)
+    await pending
+    expect(seen.stopped).toBe(1)
+    expect(seen.runs.find(r => r[0] === 'pkill')).toBeUndefined()
+    expect(newerVersion('0.7.2', '0.7.2')).toBe(false)
+    expect(newerVersion('0.7.2', '0.8.0')).toBe(false)
+    expect(newerVersion('1.0.0', '0.9.9')).toBe(true)
   })
 
   test('no Python: the install fails, so pii-mask is off and requests go through as written', async ($, on) => {

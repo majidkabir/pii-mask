@@ -28,6 +28,18 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+
+def plugin_version():
+    """The mod's version this server came with, so a newer mod knows to replace it."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".claude-plugin", "plugin.json"), encoding="utf-8") as f:
+            return str(json.load(f).get("version", ""))
+    except (OSError, ValueError):
+        return ""
+
+
+VERSION = plugin_version()
+
 MODEL = "urchade/gliner_multi_pii-v1"
 MAX_BODY = 16 * 1024 * 1024
 BATCH = 4  # chunks per model call; between calls a smaller waiting request goes first
@@ -193,7 +205,7 @@ def make_handler(backend, state, media=None):
         def do_GET(self):
             state["last"] = time.time()
             if self.path == "/health":
-                body = {"app": "pii-mask", "ok": True, "model": backend.name}
+                body = {"app": "pii-mask", "ok": True, "model": backend.name, "version": VERSION}
                 if media is not None:
                     body["media"] = media.status()
                 self.answer(200, body)
@@ -204,6 +216,11 @@ def make_handler(backend, state, media=None):
             state["last"] = time.time()
             if self.path.startswith("/media/"):
                 return self.media()
+            if self.path == "/stop":  # a newer version of the mod replaces this server
+                self.answer(200, {"stopping": True})
+                if state.get("stop"):
+                    state["stop"]()
+                return
             if self.path != "/detect":
                 return self.answer(404, {"error": "not found"})
             length = int(self.headers.get("content-length") or 0)
@@ -384,6 +401,12 @@ def main():
                 return
 
     threading.Thread(target=watchdog, daemon=True).start()
+
+    def stop():
+        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} asked to stop (a newer version starts)", flush=True)
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    state["stop"] = stop
     server.serve_forever()
     return 0
 

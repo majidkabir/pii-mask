@@ -32,6 +32,7 @@ import {
   type VaultFile,
 } from './masker'
 import { boxLabel, imageText, pdfText, spanBoxes, type Box, type OcrLine } from './media'
+import { newerVersion } from './version'
 import { OCR_PATTERNS, PATTERNS } from './patterns'
 
 /*
@@ -234,11 +235,15 @@ async function withTimeout<T>($: EngineInterface, p: Promise<T>, ms: number): Pr
   }
 }
 
+/** The version of the mod the running server came with; '' before 0.7.2, which didn't say. */
+let serverVersion = ''
+
 async function serverUp($: EngineInterface): Promise<boolean> {
   try {
     const res = await withTimeout($, $.http.fetch(`${BASE}/health`), 1500)
-    const body = JSON.parse(res.text) as { app?: string; media?: MediaStatus }
+    const body = JSON.parse(res.text) as { app?: string; media?: MediaStatus; version?: string }
     mediaStatus = body.media ?? {}
+    serverVersion = String(body.version ?? '')
     mediaCheckedAt = Date.now()
     return res.ok && body.app === NAME
   } catch {
@@ -325,7 +330,7 @@ async function pluginVersion($: EngineInterface): Promise<string> {
 }
 
 async function runEngine($: EngineInterface, retry: boolean): Promise<void> {
-  if (await serverUp($)) return engineReady($)
+  if ((await serverUp($)) && !(await replaceOlderServer($))) return engineReady($)
   const dir = await cacheDir($)
   engine.cache = dir
   const fake = (await $.env.get('PII_MASK_FAKE_MODEL')) === '1'
@@ -365,6 +370,36 @@ async function runEngine($: EngineInterface, retry: boolean): Promise<void> {
     python = await findPython($)
   }
   await startServer($, python, dir, root, fake)
+}
+
+/**
+ * A server keeps running the code it started with, across plugin updates, until
+ * it has been idle for 30 minutes. One started by an older version of the mod
+ * (before 0.7 it had no image support) is stopped here so this version starts
+ * its own. Returns true when it stopped. Only an older one: two sessions on
+ * different versions don't stop each other's.
+ */
+async function replaceOlderServer($: EngineInterface): Promise<boolean> {
+  const mine = await pluginVersion($)
+  if (!mine || !newerVersion(mine, serverVersion)) return false
+  try {
+    if (serverVersion) {
+      await withTimeout($, $.http.fetch(`${BASE}/stop`, { method: 'POST' }), 1500)
+    } else if (await isWindows($)) {
+      // Servers before 0.7.2 have no /stop.
+      const find = `Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*server.py*--port ${PORT}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
+      await $.process.run(['powershell', '-NoProfile', '-Command', find], { timeoutMs: 10_000 })
+    } else {
+      await $.process.run(['pkill', '-f', `server/server\\.py --daemon --port ${PORT}`], { timeoutMs: 5000 })
+    }
+  } catch {
+    return false // keep using it
+  }
+  for (let waited = 0; waited < 5000; waited += 250) {
+    await $.clock.sleep(250)
+    if (!(await serverUp($))) return true
+  }
+  return false
 }
 
 /** Runs the first-time setup, reporting each step. */
