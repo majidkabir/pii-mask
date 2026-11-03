@@ -874,7 +874,7 @@ async function convertMedia(
   if (b.type === 'document' && src.media_type === 'application/pdf') {
     if (!s.pdf || !status.pdf) return [droppedNote()]
     const render = s.images && !!status.images
-    const p = await mediaCall<PdfResult>($, 'pdf', { data: src.data, render, maxPages: budget.images }, 4000)
+    const p = await mediaCall<PdfResult>($, 'pdf', { data: src.data, render, maxPages: budget.images }, 10_000)
     mediaStats.pdfs += 1
     if (!p.scanned) return [{ type: 'text', text: pdfText(p, typeof b.title === 'string' ? b.title : undefined) }]
     if (!p.images.length) return [droppedNote()]
@@ -910,7 +910,7 @@ const SCANNED_NOTE = (pages: number, read: number) =>
  * lines, and a box over each value masking replaced.
  */
 async function readImage(
-  $: EngineInterface, input: { data: string } | { path: string }, ocrMs = 7000,
+  $: EngineInterface, input: { data: string } | { path: string }, ocrMs = OCR_TIMEOUT_MS,
 ): Promise<{ masked: string[]; boxes: Box[] }> {
   const { lines } = await mediaCall<{ lines: OcrLine[] }>($, 'ocr', input, ocrMs)
   // OCR's own email shape first ("sofie lindqvist@example. dk"), then the text patterns, then OCR's looser numbers.
@@ -932,10 +932,17 @@ async function readImage(
 
 const IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i
 const PDF_FILE = /\.pdf$/i
-/** Time for making a covered copy, inside the hook's 10 s. */
-const READ_BUDGET_MS = 9000
+/**
+ * Time for making a covered copy. A hook's 10 s count only its own code, not
+ * its calls to the local server, so this is a bound on how long Claude waits,
+ * not on the hook: OCR of an A4 page takes 2–8 s on a slow machine, and reads
+ * Claude makes at once queue for it.
+ */
+const READ_BUDGET_MS = 45_000
+/** Longest one OCR call may take. */
+const OCR_TIMEOUT_MS = 20_000
 /** All a mention may take, waiting for the model included; past it the mention is refused. */
-const MENTION_BUDGET_MS = 9500
+const MENTION_BUDGET_MS = 50_000
 /** WebSearch and WebFetch calls, by tool_use_id: their results get the patterns if the model is too slow. */
 const webCalls = new Set<string>()
 /** Reads pointed at a redacted copy: by tool_use_id, the original path and the masked text to add. */
@@ -968,23 +975,23 @@ async function redactedCopy($: EngineInterface, path: string, toolUseId: string)
   const dir = await copiesDir($)
   const name = `read-${Date.now()}-${copySeq++}`
   if (IMAGE_FILE.test(path)) {
-    const { masked, boxes } = await readImage($, { path }, left(1500, READ_BUDGET_MS))
+    const { masked, boxes } = await readImage($, { path }, left(1500, OCR_TIMEOUT_MS))
     const out = `${dir}/${name}.png`
-    const red = await mediaCall<{ faces: number }>($, 'redact', { path, boxes, faces: s.faces && !!status.faces, out }, left(0, 4000))
+    const red = await mediaCall<{ faces: number }>($, 'redact', { path, boxes, faces: s.faces && !!status.faces, out }, left(0, 10_000))
     count(boxes.length, red.faces)
     readCopies.set(toolUseId, { original: path, text: s.imageText && masked.length ? imageText(masked) : '' })
     return out
   }
   // A PDF: one with text is sent as its text by session.append; a scanned one is rebuilt from covered pages.
   if (!s.pdf || !status.pdf) return undefined
-  const p = await mediaCall<PdfResult>($, 'pdf', { path, render: true, maxPages: MAX_IMAGES_PER_ROW }, left(2500, 4000))
+  const p = await mediaCall<PdfResult>($, 'pdf', { path, render: true, maxPages: MAX_IMAGES_PER_ROW }, left(2500, 10_000))
   if (!p.scanned || !p.images.length) return undefined
   const pages: string[] = []
   const texts: string[] = []
   for (const page of p.images) {
     try {
-      const { masked, boxes } = await readImage($, { data: page }, left(1500, READ_BUDGET_MS))
-      const red = await mediaCall<{ data: string; faces: number }>($, 'redact', { data: page, boxes, faces: s.faces && !!status.faces }, left(500, 4000))
+      const { masked, boxes } = await readImage($, { data: page }, left(1500, OCR_TIMEOUT_MS))
+      const red = await mediaCall<{ data: string; faces: number }>($, 'redact', { data: page, boxes, faces: s.faces && !!status.faces }, left(500, 10_000))
       count(boxes.length, red.faces)
       pages.push(red.data)
       texts.push(masked.join('\n'))
@@ -994,7 +1001,7 @@ async function redactedCopy($: EngineInterface, path: string, toolUseId: string)
     }
   }
   const out = `${dir}/${name}.pdf`
-  await mediaCall($, 'topdf', { images: pages, out }, left(0, 4000))
+  await mediaCall($, 'topdf', { images: pages, out }, left(0, 10_000))
   mediaStats.pdfs += 1
   const more = p.page_count > pages.length ? ` Only its first ${pages.length} of ${p.page_count} pages are included.` : ''
   readCopies.set(toolUseId, {
@@ -1024,7 +1031,7 @@ async function mentionCopy($: EngineInterface, path: string): Promise<{ path: st
     const s = await mediaSettings($)
     const status = await freshMediaStatus($)
     if (s.pdf && status.pdf) {
-      const p = await mediaCall<PdfResult>($, 'pdf', { path, render: false }, 4000)
+      const p = await mediaCall<PdfResult>($, 'pdf', { path, render: false }, 10_000)
       if (!p.scanned) {
         const text = pdfText(p, path.split(/[\\/]/).pop())
         const before = vault.size

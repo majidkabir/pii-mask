@@ -197,8 +197,9 @@ export const PATTERNS: readonly PatternRule[] = [
  * a word, so these catch the shape without the checks the text patterns make.
  */
 export const OCR_PATTERNS: readonly PatternRule[] = [
-  whole('email (OCR)', 'EMAIL', /(?<![\w.+-])(?:[A-Za-z0-9._%+-]+ ?){1,2}@ ?[A-Za-z0-9-]+(?: ?\. ?[A-Za-z0-9-]+)*/g,
-    v => /@ ?[A-Za-z0-9-]+ ?\. ?[A-Za-z]{2,}/.test(v)),
+  // Anything with an @ between words; OCR reads the dots as ". ", ":." or ",".
+  whole('email (OCR)', 'EMAIL', /(?<![\w.+-])(?:[A-Za-z0-9._%+-]+ ?){1,2}@ ?[A-Za-z0-9-]+(?: ?[.,:;]{1,2} ?[A-Za-z0-9-]+)*/g,
+    v => /[A-Za-z0-9] ?@ ?[A-Za-z0-9-]{2,}/.test(v)),
   whole('IBAN (OCR)', 'IBAN', /\b[A-Z]{2}[0-9OIl]{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g),
   // Any long number: phone, account, ID, card, read with O, I or l for a digit.
   whole('long number (OCR)', 'NUMBER', /(?<![\w])\+?(?:[0-9OIl][ .\-/]?){5,}[0-9OIl](?![\w])/g, v => digitsOf(v).length >= 5),

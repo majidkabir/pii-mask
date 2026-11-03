@@ -11,6 +11,7 @@ const ocrRules = () => {
 describe('text read from an image', () => {
   const cases: [string, string, string][] = [
     ['Mail: sofie lindqvist@example. dk', 'EMAIL', 'sofie lindqvist@example. dk'],
+    ['E-Mail: lukas- schneider@beispiel:. de', 'EMAIL', 'lukas- schneider@beispiel:. de'], // dots read as "-" and ":."
     ['IBAN: DK5O00400440116243', 'IBAN', 'DK5O00400440116243'],
     ['Phone 28 47 l9 63 now', 'NUMBER', '28 47 l9 63'],
     ['CPR 14O387-1234', 'ID_NUMBER', '14O387-1234'], // the text rule for a named ID number catches it first

@@ -97,3 +97,17 @@ class GateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InkBoxTest(unittest.TestCase):
+    def test_the_box_is_around_the_ink_with_a_margin(self):
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        from media import ink_box
+
+        img = Image.new("RGB", (800, 1100), "white")
+        ImageDraw.Draw(img).rectangle([100, 200, 300, 260], fill="black")
+        self.assertEqual(ink_box(img), (84, 184, 317, 277))
+        self.assertEqual(ink_box(Image.new("RGB", (50, 40), "white")), (0, 0, 50, 40))
