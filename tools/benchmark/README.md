@@ -31,3 +31,29 @@ venv/bin/python eval_presidio.py synth_piimask.jsonl data/presidio-research/data
 ```
 
 `tab_score.py` computes TAB's measures as its `evaluation.py` defines them, without the BERT weighting (which needs `bert-base-uncased`). Run on Presidio's output it gives numbers close to the TAB paper's Presidio row, which checks it. `eval_presidio.py` uses presidio-evaluator's own `SpanEvaluator` as its notebook 4 does.
+
+## Images and scanned pages
+
+```bash
+venv/bin/python render.py pages        # 220 pages, clean and scanned, with gold word boxes (pages/gold.json)
+python3 -c "
+import json; g=json.load(open('pages/gold.json'))
+pick=lambda l:[p for i,p in enumerate([p for p in l if 'presidio-' in p['page']]) if i%3==0]+[p for i,p in enumerate([p for p in l if 'tab-' in p['page']]) if i%4==0]
+json.dump({k:pick(v) for k,v in g.items()},open('pages/gold_sample.json','w'))"
+for k in clean scan; do bun run_image.ts "$PWD/pages" pages/gold_sample.json img $k; done          # pii-mask (server running)
+for k in clean scan; do venv/bin/python presidio_image.py pages pages/gold_sample.json img_presidio_$k.json $k; done
+venv/bin/python score_image.py pages/gold_sample.json clean=img_both_clean.json scan=img_both_scan.json \
+  presidio_clean=img_presidio_clean.json presidio_scan=img_presidio_scan.json
+```
+
+`render.py` reads the data from `data/` as above. `run_image.ts` keeps each page's OCR in `ocr_cache/`, so a rerun after a masking change takes seconds.
+
+## Speed
+
+```bash
+<server venv>/bin/python perf.py [--pages pages]     # the server's speed and memory (also run by the real-model workflow)
+venv/bin/python presidio_perf.py                       # Presidio on the same texts and images
+bun mask_speed.ts                                      # the masking code alone
+```
+
+Results: [docs/performance.md](../../docs/performance.md).

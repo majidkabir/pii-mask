@@ -68,3 +68,29 @@ Share of each kind of value hidden (characters inside a masked span):
 - Benchmarks that need Hugging Face (ai4privacy, Nemotron-PII, Gretel finance, used in recent comparisons) couldn't be downloaded where this was run.
 - TAB's mentions starting with "Dr" count as missed when pii-mask masks only the name, since its scorer ignores "Mr" and "Mrs" but not "Dr".
 - One run, CPU, no confidence intervals.
+
+## 5. Images and scanned PDFs
+
+Recent benchmarks for this exist but couldn't be used here: [LeakageBench](https://arxiv.org/pdf/2609.02207) (500 scanned and photographed pages, 2026) is released only under a data-use agreement, and [WebPII](https://arxiv.org/html/2603.17357v1) (shop screenshots, 2026) is only on Hugging Face. LeakageBench reports the model pii-mask uses, GLiNER-multi-PII, with Amazon's OCR at 0.245 localisation F1, and Presidio's Image Redactor at 0.137.
+
+So the two benchmarks above were turned into page images: every third page of Presidio's sentences and every fourth TAB ruling's first page, 63 A4 pages at 150 dpi with 3,901 labelled words, each rendered **clean** (as a PDF page) and **scanned** (turned up to 1°, blurred, with noise, saved as JPEG at quality 50). The labels became word boxes. A labelled word counts as hidden when at least 70% of it is under a black box; box precision is the share of boxes that are at least half on labelled words. A scanned PDF goes through the same steps as an image (pii-mask covers each page), and a PDF with text is the text case in sections 1 and 2.
+
+| | Personal data ¹ | People | Street addresses | Phone numbers | TAB people | Box precision | Per page ² |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **pii-mask 0.7.9**, clean | **0.79** | 0.90 | **0.69** | 0.93 | 0.92 | 0.94 | 18 s |
+| **pii-mask 0.7.9**, scanned | **0.80** | 0.91 | **0.69** | 0.96 | 0.94 | 0.94 | 19 s |
+| pii-mask 0.7.8, clean | 0.71 | 0.89 | 0.53 | 0.93 | 0.89 | 0.94 | |
+| pii-mask 0.7.8, scanned | 0.71 | 0.90 | 0.52 | 0.96 | 0.90 | 0.94 | |
+| Presidio Image Redactor, clean | 0.16 | 0.29 | 0.05 | 0.12 | 0.47 | 0.81 | 5.5 s |
+| Presidio Image Redactor, scanned | 0.23 | 0.37 | 0.08 | 0.32 | 0.58 | 0.81 | 5.1 s |
+
+¹ Words labelled person, street address, phone, email, card, IBAN, SSN, IP address, ZIP code or driver's licence on Presidio's pages (1,554 words). ² In the 2-core container, OCR included; see [performance](performance.md).
+
+Emails, card numbers and US social security numbers were hidden at 0.91–1.00 by pii-mask in both versions. The scan noise barely mattered to pii-mask's OCR (EasyOCR).
+
+What the image benchmark changed (0.7.9):
+- **The model saw each OCR line on its own**, so "Brucker Bundesstrasse 31" wasn't an address without "Address:" on the line above. It now reads the lines as one text and each line on its own; together those found the most (one text alone lost names that stand alone on a line).
+- **A name wrapping onto the next line** was refused by the name check, which allowed no line break.
+- **An email whose dot OCR lost** ("anna@acme de") was covered only up to the space.
+
+Faces: pii-mask pixelates faces found by OpenCV's YuNet, which its authors report at 0.884 / 0.866 / 0.750 AP (easy / medium / hard) on the WIDER FACE validation set ([OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)); WIDER FACE couldn't be downloaded here to measure it again. A face filling a 1,400-pixel photo is still found.

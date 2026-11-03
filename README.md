@@ -100,6 +100,7 @@ This is an early experiment. It was built and tested with a stand-in for the rea
 
 - [How it works](docs/how-it-works.md): the technical details
 - [Benchmark](docs/benchmark.md): accuracy on two public benchmarks, next to Microsoft Presidio
+- [Performance](docs/performance.md): how fast it is on 4 kinds of machine, and what it costs
 - [Open questions](docs/open-questions.md): known gaps
 - [Development](docs/development.md): building and testing it
 - [customer-mask](https://github.com/majidkabir/customer-mask): the sibling project, for hiding a company's customers from a list

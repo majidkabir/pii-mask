@@ -6,7 +6,7 @@ Known gaps and what has not been verified yet.
 | --- | --- | --- |
 | 1 | [The real model hasn't run with the mod](#1-the-real-model-hasnt-run-with-the-mod) | 🟡 Setup and model checked in CI on 4 machines; accuracy measured on two English benchmarks ([benchmark](benchmark.md)) |
 | 2 | [Misses go out as written](#2-misses-go-out-as-written) | 🟡 Patterns added in 0.3; names and addresses still rely on the model |
-| 3 | [Speed on big tool results](#3-speed-on-big-tool-results) | ❓ Not measured |
+| 3 | [Speed on big tool results](#3-speed-on-big-tool-results) | 🟡 Measured on 4 machines ([performance](performance.md)); long files and scanned pages are slow the first time |
 | 4 | [Noise in code](#4-noise-in-code) | ❓ Not measured |
 | 5 | [First run blocks the session](#5-first-run-blocks-the-session) | ℹ️ By design; off if the install fails (0.6.0) |
 | 6 | [Machines where an organization manages Claude Code](#6-machines-where-an-organization-manages-claude-code) | ⚠️ Partly covered |
@@ -42,7 +42,7 @@ Patterns can also be wrong the other way: a passphrase made only of letters (`co
 
 ### 3. Speed on big tool results
 
-The model takes about 0.8 s per 1,000 characters on a 2-core machine (measured in a cloud container; the GitHub machines in #1 are faster). A call may take 7 seconds; content whose call takes longer is removed, not sent.
+The model reads 1,400–2,900 characters a second on GitHub's machines (1,600 in a 2-core cloud container): a 64 KB file takes 22–44 s the first time. Until 0.7.9 a call could take 7 s, so anything over roughly 10–20 KB was removed on first read; since then a call may take 90 s, run as a job on the server since Claude Code ends a plugin's HTTP request after 30 s. Figures: [performance](performance.md).
 
 What keeps that rare since 0.5.2:
 - **Cache.** The server keeps the model's answer per chunk of about 1,000 characters. Claude Code sends the same system prompt and reminders every turn, so after the first turn only new text goes through the model. In a test, hooks that ran out of time went from 4 in the first run to 0 in the third.
