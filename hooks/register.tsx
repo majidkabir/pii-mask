@@ -44,6 +44,7 @@ import { OCR_PATTERNS, PATTERNS } from './patterns'
  *   model tool call ──► tool.call ──► tool runs  (unmask arguments)
  *   system prompt, CLAUDE.md, injected text ──► prompt.compose,
  *                            prompt.context, prompt.attachment (NER, then mask)
+ *   prompt.mention         an @-mentioned image or PDF: its covered copy is attached
  *
  * The values are found by a local GLiNER model behind a small HTTP server on
  * 127.0.0.1 (server/server.py). The mod installs it on first use
@@ -932,6 +933,8 @@ const IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i
 const PDF_FILE = /\.pdf$/i
 /** Time for making a covered copy, inside the hook's 10 s. */
 const READ_BUDGET_MS = 9000
+/** All a mention may take, waiting for the model included; past it the mention is refused. */
+const MENTION_BUDGET_MS = 9500
 /** WebSearch and WebFetch calls, by tool_use_id: their results get the patterns if the model is too slow. */
 const webCalls = new Set<string>()
 /** Reads pointed at a redacted copy: by tool_use_id, the original path and the masked text to add. */
@@ -998,6 +1001,42 @@ async function redactedCopy($: EngineInterface, path: string, toolUseId: string)
     text: s.imageText ? `[This scanned PDF was sent with personal data covered by pii-mask.${more} Its text, masked:]\n${texts.join('\n\n')}` : '',
   })
   return out
+}
+
+/**
+ * A file mentioned with @ in a prompt is attached by Claude Code itself, past
+ * session.append, so an image or PDF has to be swapped before it is read: an
+ * image or scanned PDF for its covered copy (its masked text as context), a
+ * PDF with text for a text file of its masked text. Anything else that can't be
+ * checked is refused, so nothing of it is attached.
+ */
+async function mentionCopy($: EngineInterface, path: string): Promise<{ path: string; context: string } | { deny: string }> {
+  if (engine.state !== 'ready') return { deny: `${NAME}: its model isn't ready, so ${path} was not attached` }
+  const id = `mention-${copySeq}`
+  const copy = await redactedCopy($, path, id)
+  if (copy) {
+    const text = readCopies.get(id)?.text ?? ''
+    readCopies.delete(id)
+    return { path: copy, context: text }
+  }
+  if (PDF_FILE.test(path)) {
+    const s = await mediaSettings($)
+    const status = await freshMediaStatus($)
+    if (s.pdf && status.pdf) {
+      const p = await mediaCall<PdfResult>($, 'pdf', { path, render: false }, 4000)
+      if (!p.scanned) {
+        const text = pdfText(p, path.split(/[\\/]/).pop())
+        const before = vault.size
+        const masked = mask(text, await rulesFor($, [text]), vault)
+        await persist($, before)
+        const out = `${await copiesDir($)}/read-${Date.now()}-${copySeq++}.txt`
+        await $.fs.write(out, masked)
+        mediaStats.pdfs += 1
+        return { path: out, context: '' }
+      }
+    }
+  }
+  return { deny: `${NAME}: images or PDFs are switched off or not installed, so ${path} was not attached` }
 }
 
 /**
@@ -1295,6 +1334,29 @@ export const register: Register = on => {
   })
 
   // Text the engine injects on its own (mentioned files, reminders).
+  // A file mentioned with @: an image or PDF is swapped for its covered copy
+  // before Claude Code reads it (its text goes through prompt.attachment).
+  on('prompt.mention', async ($, e, next) => {
+    if (!(IMAGE_FILE.test(e.path) || PDF_FILE.test(e.path))) return next(e)
+    // All within the hook's 10 s, the wait for the model included: a hook that
+    // outlasts it is skipped and the file read as it is.
+    const swap = await withTimeout($, (async () => {
+      await ready($)
+      return engine.state === 'off' ? undefined : mentionCopy($, e.path)
+    })(), MENTION_BUDGET_MS)
+    if (!swap) return next(e) // the install failed: nothing is masked
+    if ('deny' in swap) {
+      mediaDropped += 1
+      return { deny: swap.deny }
+    }
+    readCopiesShown.set(swap.path, e.path)
+    const result = await next({ ...e, path: swap.path })
+    if (result.deny !== undefined || !swap.context) return result
+    return { ...result, context: [...(result.context ?? []), swap.context] }
+  }).catch(($, e, next) =>
+    next.called || engine.state === 'off' ? next(e) : { deny: `${NAME} could not check ${e.path} in time, so it was not attached` },
+  )
+
   on('prompt.attachment', async ($, e, next) => {
     await ready($)
     if (engine.state === 'off') return next(e) // the install failed: nothing is masked

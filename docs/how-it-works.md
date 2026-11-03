@@ -12,6 +12,7 @@ All hooks are in [`hooks/register.tsx`](../hooks/register.tsx). The masking itse
 | `prompt.compose` | Masks the per-session parts of the system prompt and adds a note telling Claude how to use placeholders. Runs for every request; the same text gives the same output, so the prompt cache keeps working. |
 | `prompt.context` | Masks `CLAUDE.md` and the other blocks of the first message. If the model wasn't running yet, they are replaced by notes and rendered again once it is. |
 | `prompt.attachment` | Masks text Claude Code injects (an `@file` mention, reminders); left out if that fails. |
+| `prompt.mention` | Swaps an `@`-mentioned image or PDF for its covered copy before it is read; refuses the mention if that fails. |
 | `classic.UserPromptSubmit` | Titles the session from the masked prompt, so the raw prompt isn't sent to make a title. |
 | `turn.step` | Unmasks the reply as it streams, holding back a placeholder split across two pieces. While the model isn't running, answers locally with the reason instead of calling Claude. |
 | `ui.render` (AssistantMessage, UserMessage, ToolUse) | Shows real values in the finished reply, the prompt and a tool call's row. Claude Code draws those from the stored rows, which hold placeholders; only the drawing changes. `WebSearch`, `WebFetch` and MCP rows keep the placeholders they sent. |
@@ -168,6 +169,7 @@ Claude Code lets `session.append` drop or move an image or PDF block, never chan
 | --- | --- |
 | `Read` of an image file | `tool.call` sends the file to the local server, which reads its text with OCR (EasyOCR, word by word with each word's box). The words are masked like any text, with looser OCR patterns first and after (an email OCR split in two, an IBAN with an O for a 0, any long number). The server draws a labelled box over each masked word (`PERSON_1`), pixelates faces (OpenCV's YuNet), writes the copy as PNG (no metadata) to `.claude/pii-mask/` in the project, and the `Read` is pointed at it. `session.append` keeps that tool result's image and adds the masked text. The tool row on screen still shows the file you asked for. |
 | `Read` of a scanned PDF | The first 2 pages are rendered (pypdfium2), covered as above, and rebuilt into a PDF the `Read` is pointed at. |
+| An image or PDF mentioned with `@` | Claude Code attaches it itself, past `session.append`, so `prompt.mention` swaps the file before it is read: an image or scanned PDF for its covered copy (its masked text added as context), a PDF with text for a `.txt` of its masked text. If that can't be done within 9.5 s, or images are switched off, the mention is refused and nothing of the file is attached. |
 | A PDF with text (read or pasted) | `session.append` swaps the document for its text (pypdf), page by page, with filled-in form fields; it is then masked like any text. Up to 200,000 characters. |
 | An image pasted, or from another tool | Dropped; its masked text is sent in its place, with a note saying how to send it covered. |
 

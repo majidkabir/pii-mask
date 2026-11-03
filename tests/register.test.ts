@@ -63,7 +63,7 @@ function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
   const cache = w.windows ? WIN_CACHE : CACHE
   const files: Record<string, string> = { ...(w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }), ...w.files }
-  const seen = { stopped: 0, read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
+  const seen = { stopped: 0, mentioned: '', read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
   let up = w.up !== false
   let serverVersion = w.serverVersion
   const finds = w.finds ?? FINDS
@@ -192,6 +192,10 @@ function world(on: On, w: World = {}) {
   on('prompt.compose', () => ({ sections: w.sections ?? [] }))
   on('prompt.context', () => ({ blocks: [] }) as never)
   on('prompt.attachment', () => ({ text: null }) as never)
+  on('prompt.mention', ($, e) => {
+    seen.mentioned = e.path
+    return { type: 'file' } as never
+  })
   return { seen, clock }
 }
 
@@ -752,6 +756,46 @@ describe('images and PDFs', () => {
     const inner = (seen.appended.at(-1) as { content: { type: string; text?: string }[] }[])[0]?.content ?? []
     expect(inner.map(b => b.type)).toEqual(['document', 'text'])
     expect(inner[1]?.text).toContain('first 2 of 3 pages')
+  })
+
+  test('an image mentioned with @ is attached as its covered copy, with its masked text', async ($, on) => {
+    const { seen } = world(on, { media: { ocr: OCR } })
+    await start($)
+    const res = await $.prompt.mention({ mention: 'card.png', path: '/proj/card.png' } as never) as { type: string; context?: string[] }
+    expect(seen.mentioned).toMatch(/^\/proj\/\.claude\/pii-mask\/read-.*\.png$/)
+    expect(seen.mediaCalls.find(c => c.kind === 'redact')?.body).toMatchObject({ path: '/proj/card.png', out: seen.mentioned })
+    expect(res.type).toBe('file')
+    expect(res.context?.join('\n')).toContain('Customer: <<PERSON_1.')
+    expect(JSON.stringify(res)).not.toContain('Lars')
+  })
+
+  test('a PDF with text mentioned with @ is attached as a text file of its masked text', async ($, on) => {
+    const { seen } = world(on, { media: { pdf: { pages: ['Invoice for Lars Holm'], page_count: 1, scanned: false, images: [] } } })
+    await start($)
+    await $.prompt.mention({ mention: 'invoice.pdf', path: '/proj/invoice.pdf' } as never)
+    expect(seen.mentioned).toMatch(/^\/proj\/\.claude\/pii-mask\/read-.*\.txt$/)
+    const written = seen.writes[Object.keys(seen.writes).find(k => k.replace(/\\/g, '/').endsWith('.txt')) ?? '']
+    expect(written).toContain('Invoice for <<PERSON_1.')
+    expect(written).not.toContain('Lars')
+  })
+
+  test('a mentioned image is refused when images are switched off or the model is not ready; other files are left alone', async ($, on) => {
+    const { seen } = world(on, { media: { ocr: OCR } })
+    await start($)
+    await $.command.run({ command: 'pii-mask', args: 'media images off' } as never)
+    const res = await $.prompt.mention({ mention: 'card.png', path: '/proj/card.png' } as never) as { deny?: string }
+    expect(res.deny).toContain('switched off')
+    expect(seen.mentioned).toBe('')
+    await $.prompt.mention({ mention: 'notes.md', path: '/proj/notes.md' } as never)
+    expect(seen.mentioned).toBe('/proj/notes.md')
+  })
+
+  test('a mentioned image is refused while the model is starting', async ($, on) => {
+    const { seen, clock } = world(on, { up: false, serverNeverStarts: true })
+    const pending = $.prompt.mention({ mention: 'card.png', path: '/proj/card.png' } as never) as Promise<{ deny?: string }>
+    await clock.advance(10_000)
+    expect((await pending).deny).toBeDefined()
+    expect(seen.mentioned).toBe('')
   })
 
   test('switched off, an image file is read as it is and its image is dropped with a note; the switch is kept', async ($, on) => {

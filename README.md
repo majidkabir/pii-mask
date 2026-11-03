@@ -32,7 +32,7 @@ You don't make a list or set anything up. Two things work together, both **on yo
 ## Images and PDFs
 
 - **A PDF with text** is sent as its text, with the personal data masked like any text.
-- **An image Claude reads from a file** (a screenshot, a scanned page, a business card) is read on your computer. Claude gets a copy with **black boxes over the personal data and faces pixelated**, plus the masked text in it.
+- **An image Claude reads from a file, or you mention with `@`** (a screenshot, a scanned page, a business card) is read on your computer. Claude gets a copy with **black boxes over the personal data and faces pixelated**, plus the masked text in it.
 - **A scanned PDF** is rebuilt from its pages, covered the same way (the first 2 pages).
 - **An image pasted into your message** can't be swapped (Claude Code doesn't let plugins change those), so it is left out and its masked text is sent instead. To send it covered, save it as a file and ask Claude to read it.
 
