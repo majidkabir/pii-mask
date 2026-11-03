@@ -605,7 +605,8 @@ async function nerFind($: EngineInterface, texts: readonly string[]): Promise<Ne
  * the model finds in it, then every value found before.
  */
 async function rulesFor($: EngineInterface, texts: readonly string[]): Promise<Rule[]> {
-  return [...PATTERNS, ...findRules(await nerFind($, texts), vault)]
+  // Values already in the vault first, whole: an OCR'd email ("anna berg@example.dk") stays one placeholder.
+  return [...findRules([], vault), ...PATTERNS, ...findRules(await nerFind($, texts), vault)]
 }
 
 /* ------------------------------------------------------------------ session */
@@ -1164,7 +1165,7 @@ export const register: Register = on => {
     // get the patterns and known values instead of being removed, so the
     // screen doesn't lose them right after installing.
     const own = (e.door === 'command' || e.door === 'notice') && engine.state !== 'ready'
-    const known = () => [...PATTERNS, ...findRules([], vault)]
+    const known = () => [...findRules([], vault), ...PATTERNS]
     // Web results are public pages fetched for a query that kept its placeholders;
     // they are often long, so if the model can't check them in time, the patterns
     // and every value found so far do, instead of the result being removed.

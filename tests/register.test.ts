@@ -705,6 +705,21 @@ describe('images and PDFs', () => {
     expect(JSON.stringify(inner)).not.toContain('Lars')
   })
 
+  test('an email as OCR read it stays one placeholder when Claude writes it back', async ($, on) => {
+    const ocrEmail = 'anna berg@example.dk' // OCR reads the dot in "anna.berg" as a space
+    const ocr = { width: 400, height: 40, lines: [{ text: ocrEmail, words: [{ text: ocrEmail, box: [0, 0, 200, 20], start: 0 }] }] }
+    world(on, { media: { ocr } })
+    await start($)
+    await $.tool.call({ tool: 'Read', file_path: '/proj/card.png', tool_use_id: 't1' } as never)
+    const stored = await $.session.append({
+      message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: `Her email is ${ocrEmail}.` }] },
+      door: 'response', origin: { kind: 'model' }, uuid: 'a2',
+    } as never)
+    const text = JSON.stringify(stored.message?.content)
+    expect(text).not.toContain('anna')
+    expect(text).toMatch(/Her email is <<EMAIL_1\.[a-z0-9]{4}>>\./)
+  })
+
   test('an email OCR split in two is covered whole', async ($, on) => {
     const line = 'Mail: anna berg@example. dk'
     const ocr = { width: 400, height: 40, lines: [{ text: line, words: [word('Mail:', 0, 0), word('anna', 60, 6), word('berg@example.', 110, 11), word('dk', 250, 25)] }] }
