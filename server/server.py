@@ -40,6 +40,33 @@ def plugin_version():
 
 VERSION = plugin_version()
 
+
+def peak_rss_mb():
+    """The most memory this process has held, in MB (None where it can't be read)."""
+    try:
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return round(peak / (1024 * 1024 if sys.platform == "darwin" else 1024))  # bytes on macOS, KB on Linux
+    except ImportError:  # Windows
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class Counters(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+            c = Counters()
+            c.cb = ctypes.sizeof(c)
+            ctypes.windll.psapi.GetProcessMemoryInfo(ctypes.windll.kernel32.GetCurrentProcess(), ctypes.byref(c), c.cb)
+            return round(c.PeakWorkingSetSize / (1024 * 1024))
+        except Exception:
+            return None
+
 MODEL = "urchade/gliner_multi_pii-v1"
 MAX_BODY = 16 * 1024 * 1024
 BATCH = 4  # chunks per model call; between calls a smaller waiting request goes first
@@ -205,7 +232,7 @@ def make_handler(backend, state, media=None):
         def do_GET(self):
             state["last"] = time.time()
             if self.path == "/health":
-                body = {"app": "pii-mask", "ok": True, "model": backend.name, "version": VERSION}
+                body = {"app": "pii-mask", "ok": True, "model": backend.name, "version": VERSION, "peak_rss_mb": peak_rss_mb()}
                 if media is not None:
                     body["media"] = media.status()
                 self.answer(200, body)

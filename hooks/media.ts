@@ -4,10 +4,36 @@
  * server for the OCR, the PDF text and the drawing.
  */
 
+import { mask, valueSpans, type Rule, type Vault } from './masker'
+
 /** A word OCR read: its text, its box in the image, and where it starts in its line's text. */
 export type OcrWord = { text: string; box: [number, number, number, number]; start: number }
 export type OcrLine = { text: string; words: OcrWord[] }
 export type Box = { box: [number, number, number, number]; label: string }
+
+/**
+ * Masks an image's lines as one text, as a file's text is masked: the model
+ * sees each line with the lines around it, and a value over several lines (an
+ * address on a letter) is one value. Then a box over each masked value's words,
+ * line by line. `masked` is the text Claude gets, line by line.
+ */
+export function maskLines(lines: readonly OcrLine[], rules: readonly Rule[], vault: Vault): { masked: string[]; boxes: Box[] } {
+  const text = lines.map(l => l.text).join('\n')
+  const masked = mask(text, rules, vault)
+  if (masked === text) return { masked: masked.split('\n'), boxes: [] }
+  const spans = valueSpans(text, masked, vault)
+  const boxes: Box[] = []
+  let offset = 0
+  for (const line of lines) {
+    const end = offset + line.text.length
+    const here = spans
+      .filter(v => v.start < end && v.end > offset)
+      .map(v => ({ start: Math.max(v.start, offset) - offset, end: Math.min(v.end, end) - offset, label: boxLabel(v.token) }))
+    if (here.length) boxes.push(...spanBoxes(line, here))
+    offset = end + 1
+  }
+  return { masked: masked.split('\n'), boxes }
+}
 
 /**
  * The boxes covering spans of a line's text (one per span, around the words

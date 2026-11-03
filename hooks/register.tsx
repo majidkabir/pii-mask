@@ -31,7 +31,7 @@ import {
   type Rule,
   type VaultFile,
 } from './masker'
-import { boxLabel, imageText, pdfText, spanBoxes, type Box, type OcrLine } from './media'
+import { imageText, maskLines, pdfText, type Box, type OcrLine } from './media'
 import { newerVersion } from './version'
 import { OCR_PATTERNS, PATTERNS } from './patterns'
 
@@ -915,16 +915,10 @@ async function readImage(
   const { lines } = await mediaCall<{ lines: OcrLine[] }>($, 'ocr', input, ocrMs)
   // OCR's own email shape first ("sofie lindqvist@example. dk"), then the text patterns, then OCR's looser numbers.
   const [ocrEmail, ...ocrRest] = OCR_PATTERNS
-  const finds = lines.length ? await nerFind($, lines.map(l => l.text)) : []
+  // The model reads the lines as one text, with their context ("Address:" on the line above).
+  const finds = lines.length ? await nerFind($, [lines.map(l => l.text).join('\n')]) : []
   const rules = [...(ocrEmail ? [ocrEmail] : []), ...PATTERNS, ...ocrRest, ...findRules(finds, vault)]
-  const boxes: Box[] = []
-  const masked: string[] = []
-  for (const line of lines) {
-    const m = mask(line.text, rules, vault)
-    masked.push(m)
-    if (m === line.text) continue
-    boxes.push(...spanBoxes(line, valueSpans(line.text, m, vault).map(v => ({ start: v.start, end: v.end, label: boxLabel(v.token) }))))
-  }
+  const { masked, boxes } = maskLines(lines, rules, vault)
   return { masked, boxes }
 }
 

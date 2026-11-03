@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { mask, valueSpans, Vault } from '../hooks/masker'
-import { boxLabel, pdfText, spanBoxes } from '../hooks/media'
+import { findRules, mask, valueSpans, Vault } from '../hooks/masker'
+import { boxLabel, maskLines, pdfText, spanBoxes } from '../hooks/media'
 import { OCR_PATTERNS, PATTERNS } from '../hooks/patterns'
 
 const ocrRules = () => {
@@ -12,6 +12,7 @@ describe('text read from an image', () => {
   const cases: [string, string, string][] = [
     ['Mail: sofie lindqvist@example. dk', 'EMAIL', 'sofie lindqvist@example. dk'],
     ['E-Mail: lukas- schneider@beispiel:. de', 'EMAIL', 'lukas- schneider@beispiel:. de'], // dots read as "-" and ":."
+    ['SzaszJanka@cuvox de', 'EMAIL', 'SzaszJanka@cuvox de'], // the dot lost entirely
     ['IBAN: DK5O00400440116243', 'IBAN', 'DK5O00400440116243'],
     ['Phone 28 47 l9 63 now', 'NUMBER', '28 47 l9 63'],
     ['CPR 14O387-1234', 'ID_NUMBER', '14O387-1234'], // the text rule for a named ID number catches it first
@@ -68,3 +69,25 @@ describe('PDF text', () => {
     expect(t).toContain('The rest of the PDF was left out')
   })
 })
+
+describe('masking an image\'s lines', () => {
+  const line = (text: string, y: number) => {
+    let at = 0
+    const words = text.split(' ').map(w => {
+      const word = { text: w, box: [at * 10, y, (at + w.length) * 10, y + 20] as [number, number, number, number], start: at }
+      at += w.length + 1
+      return word
+    })
+    return { text, words }
+  }
+
+  test('a value over several lines is one value, with a box on each of its lines', () => {
+    const v = new Vault('k3f9')
+    const lines = [line('Address:', 0), line('Brucker Bundesstrasse 31', 30), line('Suite 245', 60), line('Thanks', 90)]
+    const rules = findRules([{ value: 'Brucker Bundesstrasse 31\nSuite 245', label: 'ADDRESS' }], v)
+    const { masked, boxes } = maskLines(lines, rules, v)
+    expect(masked.join('\n')).toMatch(/^Address:\n<<ADDRESS_1\.k3f9>>\nThanks$/)
+    expect(boxes.map(b => b.box)).toEqual([[0, 30, 240, 50], [0, 60, 90, 80]])
+  })
+})
+
