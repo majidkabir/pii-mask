@@ -11,6 +11,7 @@ describe('text read from an image', () => {
     ['E-Mail: lukas- schneider@beispiel:. de', 'EMAIL', 'lukas- schneider@beispiel:. de'], // dots read as "-" and ":."
     ['SzaszJanka@cuvox de', 'EMAIL', 'SzaszJanka@cuvox de'], // the dot lost entirely
     ['email? Janina Tokareva@superrito. com', 'EMAIL', 'Janina Tokareva@superrito. com'], // split at a capital
+    ['Kari Nordmann kari .nordmann@online.no', 'EMAIL', 'kari .nordmann@online.no'], // split before the dot
     ['Account DK89 3704 0044 0532 0130 00 refund', 'IBAN', 'DK89 3704 0044 0532 0130 00'], // checksum fails (a misread); not a phone after "00"
     ['IBAN: DK5O00400440116243', 'IBAN', 'DK5O00400440116243'],
     ['Phone 28 47 l9 63 now', 'NUMBER', '28 47 l9 63'],
