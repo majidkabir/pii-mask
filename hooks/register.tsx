@@ -872,8 +872,10 @@ const SCANNED_NOTE = (pages: number, read: number) =>
  * Reads an image's text with OCR and works out where to cover it: the masked
  * lines, and a box over each value masking replaced.
  */
-async function readImage($: EngineInterface, input: { data: string } | { path: string }): Promise<{ masked: string[]; boxes: Box[] }> {
-  const { lines } = await mediaCall<{ lines: OcrLine[] }>($, 'ocr', input, 7000)
+async function readImage(
+  $: EngineInterface, input: { data: string } | { path: string }, ocrMs = 7000,
+): Promise<{ masked: string[]; boxes: Box[] }> {
+  const { lines } = await mediaCall<{ lines: OcrLine[] }>($, 'ocr', input, ocrMs)
   // OCR's own email shape first ("sofie lindqvist@example. dk"), then the text patterns, then OCR's looser numbers.
   const [ocrEmail, ...ocrRest] = OCR_PATTERNS
   const finds = lines.length ? await nerFind($, lines.map(l => l.text)) : []
@@ -893,6 +895,8 @@ async function readImage($: EngineInterface, input: { data: string } | { path: s
 
 const IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i
 const PDF_FILE = /\.pdf$/i
+/** Time for making a covered copy, inside the hook's 10 s. */
+const READ_BUDGET_MS = 9000
 /** WebSearch and WebFetch calls, by tool_use_id: their results get the patterns if the model is too slow. */
 const webCalls = new Set<string>()
 /** Reads pointed at a redacted copy: by tool_use_id, the original path and the masked text to add. */
@@ -910,34 +914,48 @@ let copySeq = 0
  */
 async function redactedCopy($: EngineInterface, path: string, toolUseId: string): Promise<string | undefined> {
   if (engine.state !== 'ready' || !(IMAGE_FILE.test(path) || PDF_FILE.test(path))) return undefined
+  // One deadline for the whole copy, inside the hook's 10 s: Claude often reads
+  // several files at once, and OCR runs one image at a time, so a read may first
+  // wait for another's OCR. Each step gets what is left instead of a fixed limit.
+  const deadline = Date.now() + READ_BUDGET_MS
+  const left = (reserve: number, cap: number) => {
+    const ms = Math.min(cap, deadline - reserve - Date.now())
+    if (ms < 300) throw new Error('out of time')
+    return ms
+  }
   const s = await mediaSettings($)
   const status = await freshMediaStatus($)
   if (!s.images || !status.images) return undefined
   const dir = await copiesDir($)
   const name = `read-${Date.now()}-${copySeq++}`
   if (IMAGE_FILE.test(path)) {
-    const { masked, boxes } = await readImage($, { path })
+    const { masked, boxes } = await readImage($, { path }, left(1500, READ_BUDGET_MS))
     const out = `${dir}/${name}.png`
-    const red = await mediaCall<{ faces: number }>($, 'redact', { path, boxes, faces: s.faces && !!status.faces, out }, 4000)
+    const red = await mediaCall<{ faces: number }>($, 'redact', { path, boxes, faces: s.faces && !!status.faces, out }, left(0, 4000))
     count(boxes.length, red.faces)
     readCopies.set(toolUseId, { original: path, text: s.imageText && masked.length ? imageText(masked) : '' })
     return out
   }
   // A PDF: one with text is sent as its text by session.append; a scanned one is rebuilt from covered pages.
   if (!s.pdf || !status.pdf) return undefined
-  const p = await mediaCall<PdfResult>($, 'pdf', { path, render: true, maxPages: MAX_IMAGES_PER_ROW }, 4000)
+  const p = await mediaCall<PdfResult>($, 'pdf', { path, render: true, maxPages: MAX_IMAGES_PER_ROW }, left(2500, 4000))
   if (!p.scanned || !p.images.length) return undefined
   const pages: string[] = []
   const texts: string[] = []
   for (const page of p.images) {
-    const { masked, boxes } = await readImage($, { data: page })
-    const red = await mediaCall<{ data: string; faces: number }>($, 'redact', { data: page, boxes, faces: s.faces && !!status.faces }, 4000)
-    count(boxes.length, red.faces)
-    pages.push(red.data)
-    texts.push(masked.join('\n'))
+    try {
+      const { masked, boxes } = await readImage($, { data: page }, left(1500, READ_BUDGET_MS))
+      const red = await mediaCall<{ data: string; faces: number }>($, 'redact', { data: page, boxes, faces: s.faces && !!status.faces }, left(500, 4000))
+      count(boxes.length, red.faces)
+      pages.push(red.data)
+      texts.push(masked.join('\n'))
+    } catch (err) {
+      if (!pages.length) throw err
+      break // out of time: send the pages covered so far
+    }
   }
   const out = `${dir}/${name}.pdf`
-  await mediaCall($, 'topdf', { images: pages, out }, 4000)
+  await mediaCall($, 'topdf', { images: pages, out }, left(0, 4000))
   mediaStats.pdfs += 1
   const more = p.page_count > pages.length ? ` Only its first ${pages.length} of ${p.page_count} pages are included.` : ''
   readCopies.set(toolUseId, {

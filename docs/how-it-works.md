@@ -172,6 +172,6 @@ Claude Code lets `session.append` drop or move an image or PDF block, never chan
 
 The copies are inside the project because Claude Code asks before reading outside the working folder; the folder has a `.gitignore` of `*`, and the server keeps the newest 20.
 
-Each part can be switched off with `/pii-mask media <pdf|images|faces|image-text> on|off`, kept across sessions in `$.store`. Switched off, not installed, unreadable or too slow (OCR has 7 s, a row 10 s, at most 2 images per row): the image or PDF is dropped with a note, as before 0.7.
+Each part can be switched off with `/pii-mask media <pdf|images|faces|image-text> on|off`, kept across sessions in `$.store`. Switched off, not installed, unreadable or too slow (OCR has 7 s, a row 10 s, at most 2 images per row): the image or PDF is dropped with a note, as before 0.7. A covered copy for the Read tool has 9 s in all, shared by its steps, since Claude often reads several files at once and OCR runs one image at a time; a scanned page is rendered at about 1400 px on its long side.
 
 The libraries (`easyocr`, `pypdf`, `pypdfium2`, with `torchvision` from the same place as PyTorch) are installed with GLiNER; the OCR and face models (about 100 MB) are downloaded from GitHub in step 4. If any of that fails, text is still masked and images are dropped. An install made before 0.7 gets them added in the background (`setup.py --media`), once; `/pii-mask media install` tries again.

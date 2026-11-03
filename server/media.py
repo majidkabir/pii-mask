@@ -22,6 +22,7 @@ YUNET = "face_detection_yunet_2023mar.onnx"
 YUNET_URL = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/" + YUNET
 MAX_SIDE = 1568  # Claude scales larger images down anyway; smaller is faster to read
 MAX_PDF_CHARS = 200_000
+RENDER_SIDE = 1400  # a scanned page is rendered to this many pixels on its long side
 SCANNED_CHARS_PER_PAGE = 20  # less text than this per page: a scan, read as images
 
 
@@ -113,7 +114,9 @@ class Media:
 
             doc = pypdfium2.PdfDocument(data)
             for i in range(min(len(doc), max_pages)):
-                pil = doc[i].render(scale=2).to_pil()
+                # About 1400 px on the long side: enough for OCR, and OCR time grows with the pixels.
+                w, h = doc[i].get_size()
+                pil = doc[i].render(scale=min(2.0, RENDER_SIDE / max(w, h, 1))).to_pil()
                 images.append(png(fit(pil)))
         return {"pages": pages, "page_count": count, "scanned": scanned, "truncated": total > MAX_PDF_CHARS, "images": images}
 
