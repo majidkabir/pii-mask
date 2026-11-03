@@ -1,6 +1,6 @@
 # Benchmark
 
-pii-mask measured on two public, standard benchmarks, next to Microsoft Presidio scored the same way on the same machine. Measured November 2026 with pii-mask 0.7.7 (model `urchade/gliner_multi_pii-v1`), Presidio 2.2.366 with `en_core_web_lg`. Scripts and steps to rerun: [tools/benchmark](../tools/benchmark/README.md).
+pii-mask measured on two public, standard benchmarks, next to Microsoft Presidio scored the same way on the same machine. Measured November 2026 with pii-mask 0.7.8 (model `urchade/gliner_multi_pii-v1`), Presidio 2.2.366 with `en_core_web_lg`. Scripts and steps to rerun: [tools/benchmark](../tools/benchmark/README.md).
 
 **Short version:** pii-mask finds people, card numbers, phone numbers and street addresses as well as or better than Presidio, and masks less that shouldn't be masked. It finds less in total because it leaves out what isn't personal data in a developer's work by design: dates, countries, nationalities, ages, organisations, domains and case numbers.
 
@@ -10,7 +10,7 @@ pii-mask measured on two public, standard benchmarks, next to Microsoft Presidio
 
 | System | Entity recall, direct | Entity recall, quasi | Mention recall | Mention precision | Token recall, people |
 | --- | --- | --- | --- | --- | --- |
-| **pii-mask 0.7.7** | 0.474 | 0.210 | 0.242 | **0.850** | **0.948** |
+| **pii-mask 0.7.8** | 0.474 | 0.210 | 0.242 | **0.850** | **0.948** |
 | pii-mask 0.7.6 | 0.466 | 0.204 | 0.238 | 0.476 | 0.938 |
 | Presidio, measured here | 0.486 | 0.764 | 0.716 | 0.715 | 0.911 |
 | *Published (TAB paper, test set):* | | | | | |
@@ -30,7 +30,7 @@ How to read it:
 
 | System | Precision | Recall | F2 |
 | --- | --- | --- | --- |
-| **pii-mask 0.7.7** | **0.808** | 0.544 | 0.582 |
+| **pii-mask 0.7.8** | **0.808** | 0.544 | 0.582 |
 | pii-mask 0.7.6 | 0.764 | 0.503 | 0.540 |
 | Presidio, measured here | 0.680 | 0.575 | 0.593 |
 | *Presidio, published in presidio-research's notebook* | *0.733* | *0.646* | *0.661* |
@@ -56,7 +56,7 @@ Share of each kind of value hidden (characters inside a masked span):
 | Job title | 92 | 0.01 | 0.06 |
 | US driver's licence | 5 | 0.00 | 1.00 |
 
-## 3. What the benchmarks changed (0.7.7)
+## 3. What the benchmarks changed (0.7.7–0.7.8)
 
 - **Roles were taken for names.** The model tagged "The applicant", "Secretary of State", "His wife" and "the prison governor" as people, and a value found once is masked everywhere, so "the applicant" became a placeholder 1,106 times in TAB. Role words are now never a name on their own, nor is anything starting with an article or a possessive. TAB precision went from 0.476 to 0.850.
 - **"Mr Holm" after "Lars Holm" was missed.** The surname of a name already found is now masked right after a title (Mr, Mrs, Dr, Herr, Frau...), with its capital, and nowhere else.
