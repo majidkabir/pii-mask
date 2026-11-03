@@ -41,6 +41,20 @@ describe('finds', () => {
     ])).toEqual([find('Jörg Müller', 'PERSON'), find('Anna Berg', 'PERSON'), find('Holm', 'PERSON')])
   })
 
+  test('roles are not names: "The applicant", "Secretary of State", "His wife"', () => {
+    const roles = ['The applicant', 'Secretary of State', 'His wife', 'the prison governor', 'Lord Chief Justice', 'Trustee in Bankruptcy', 'Registrar']
+    expect(nerFinds(roles.map(text => ({ text, label: 'person' })))).toEqual([])
+    expect(nerFinds([{ text: 'Theodor Berg', label: 'person' }])).toEqual([find('Theodor Berg', 'PERSON')])
+  })
+
+  test('a found name\'s surname is masked after a title, and only there', () => {
+    const v = new Vault('k3f9')
+    const rules = findRules([find('Lars Holm', 'PERSON'), find('Peter Darby', 'PERSON')], v)
+    const out = mask('Lars Holm wrote. Mr Holm and Dr. Darby agreed; Mrs J. Holm too. Holm Street and holm stay.', rules, v)
+    expect(out).not.toMatch(/Mr Holm|Darby|J\. Holm/)
+    expect(out).toContain('Holm Street and holm stay.')
+  })
+
   test('shapes: each label keeps only finds that can be what it says', () => {
     const cases: [string, string, boolean][] = [
       ['onMatch', 'person', false], ['RAW_FIELDS', 'person', false], ['lars', 'person', false], ['Mette Sørensen', 'person', true],
@@ -49,7 +63,7 @@ describe('finds', () => {
       ['DK50 0040 0440 1162 43', 'iban', true], ['DK50', 'iban', false],
       ['4111 1111 1111 1111', 'credit card number', true], ['4111', 'credit card number', false],
       ['192.168.1.20', 'ip address', true], ['localhost', 'ip address', false],
-      ['Havnegade 12, 1058 København K', 'address', true], ['{ a: 1 }', 'address', false],
+      ['Havnegade 12, 1058 København K', 'address', true], ['Havnegade 12\n1058 København K\nDenmark', 'address', true], ['{ a: 1 }', 'address', false],
     ]
     for (const [text, label, kept] of cases) expect([text, nerFinds([{ text, label }]).length === 1]).toEqual([text, kept])
   })

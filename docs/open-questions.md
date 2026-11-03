@@ -4,7 +4,7 @@ Known gaps and what has not been verified yet.
 
 | # | Topic | Status |
 | --- | --- | --- |
-| 1 | [The real model hasn't run with the mod](#1-the-real-model-hasnt-run-with-the-mod) | 🟡 Setup and model checked in CI on 4 machines; accuracy not measured |
+| 1 | [The real model hasn't run with the mod](#1-the-real-model-hasnt-run-with-the-mod) | 🟡 Setup and model checked in CI on 4 machines; accuracy measured on two English benchmarks ([benchmark](benchmark.md)) |
 | 2 | [Misses go out as written](#2-misses-go-out-as-written) | 🟡 Patterns added in 0.3; names and addresses still rely on the model |
 | 3 | [Speed on big tool results](#3-speed-on-big-tool-results) | ❓ Not measured |
 | 4 | [Noise in code](#4-noise-in-code) | ❓ Not measured |
@@ -32,7 +32,7 @@ Since 0.5.0, [real-model.yml](../.github/workflows/real-model.yml) runs the real
 
 Since 0.7.0 the same run checks images and PDFs: a PDF's text (under 0.01 s everywhere), OCR of a small image (2.2–4.7 s; 9.3 s on Apple silicon, where the OCR model was still loading after start), and drawing the boxes (under 0.1 s). Since 0.7.5 OCR reads only the part of an image with ink on it, and may take 20 s (a hook's own 10 s don't count its calls to the server). Retested on a fresh install (Python 3.12, empty cache, Sonnet 5.5): before that change a 2-page scanned A4 letter read alongside an image missed the old 7 s limit and was left out.
 
-Install times are on fast data-centre connections; at home the 1.5–2.5 GB download decides. Still to measure: how well it finds personal data across real text, and speed on long tool results ([#3](#3-speed-on-big-tool-results)).
+Install times are on fast data-centre connections; at home the 1.5–2.5 GB download decides. Accuracy on two public English benchmarks (TAB and Presidio's evaluation set) is in [benchmark](benchmark.md): people 0.90–0.95 found, precision 0.81–0.85. Still to measure: other languages, and speed on long tool results ([#3](#3-speed-on-big-tool-results)).
 
 ### 2. Misses go out as written
 

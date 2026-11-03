@@ -119,7 +119,13 @@ const NOT_NAMES = new Set(
     'department office contact marketing finance hr operations product project ' +
     'jeg mig min mit mine vi os vores du dig din dit dine han hun hans hendes de dem deres kære hej kunde ' +
     'jag mitt oss vår våra dina hon henne kund hei meg deg ' +
-    'ich mich mein meine wir uns unser sie ihr ihre er ihn sein liebe lieber hallo herr frau')
+    'ich mich mein meine wir uns unser sie ihr ihre er ihn sein liebe lieber hallo herr frau ' +
+    // roles in letters, tickets and rulings ("The applicant", "Secretary of State", "the prison governor")
+    'in for on at by applicant applicants defendant plaintiff claimant respondent witness victim complainant ' +
+    'wife husband son daughter mother father brother sister child children parent parents family partner ' +
+    'secretary state registrar prosecutor public governor trustee bankruptcy justice judge judges court lord ' +
+    'minister ministry president chairman police inspector constable commissioner ombudsman mayor deputy general ' +
+    'prisoner patient doctor lawyer counsel solicitor attorney agent government prison home employee employer')
     .split(' '),
 )
 
@@ -128,6 +134,8 @@ export function looksLikeName(value: string): boolean {
   // Claude itself ("Co-Authored-By: Claude Sonnet 5.5" in Claude Code's own instructions).
   if (/^Claude(\s+(Code|Sonnet|Opus|Haiku|Fable|Mythos)\b.*)?$/.test(value)) return false
   if (value.split(/[\s.,]+/).filter(Boolean).every(w => NOT_NAMES.has(w.toLowerCase()))) return false
+  // "The applicant", "His wife": a name doesn't start with an article or a possessive.
+  if (/^(the|a|an|his|her|their|my|our|your|its|this|that|der|die|das|den|dem|ein|eine|le|la|les|el|los|las|il|de|het|een)\s/i.test(value)) return false
   if (/[^\p{L}\p{M}\p{N} .,&'’/-]/u.test(value) || value.includes('&&')) return false
   return value.split(/[\s/-]+/).every(w => !/\p{Ll}\p{Lu}/u.test(w))
 }
@@ -141,7 +149,8 @@ const digits = (v: string) => v.replace(/\D/g, '').length
 const SHAPE: Record<string, (v: string) => boolean> = {
   PERSON: looksLikeName,
   // A street address has a number; "home address" or a town alone is not one.
-  ADDRESS: v => /\p{L}/u.test(v) && /\d/.test(v) && v.length >= 5 && !/[^\p{L}\p{M}\p{N} .,'’/#-]/u.test(v),
+  // Over several lines too, as on a letter or an invoice.
+  ADDRESS: v => /\p{L}/u.test(v) && /\d/.test(v) && v.length >= 5 && !/[^\p{L}\p{M}\p{N}\s.,'’/#-]/u.test(v) && (v.match(/\n/g) ?? []).length <= 5,
   EMAIL: v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v),
   PHONE: v => digits(v) >= 6 && !/[^\d\s+().-]/.test(v),
   IBAN: v => /^[A-Za-z]{2}\d{2}/.test(v.replace(/\s/g, '')) && digits(v) >= 8,
@@ -271,6 +280,29 @@ export function findRules(finds: readonly NerFind[], vault: Vault): Rule[] {
   return [...byLabel]
     .sort(([a], [b]) => (a === 'EMAIL' ? -1 : b === 'EMAIL' ? 1 : 0))
     .map(([label, values]) => ({ label, scan: valueScanner(values), normalize: exactKey }))
+    .concat(titledSurnames([...byLabel.get('PERSON') ?? []]))
+}
+
+/** Titles a surname alone follows ("Mr Holm", "Dr. Price", "Frau Müller"). */
+const SURNAME_TITLES = 'Mr|Mrs|Ms|Miss|Mx|Dr|Prof|Sir|Lady|Herr|Frau|Hr|Fr|Fru|Mme|Mlle|Monsieur|Madame|Señor|Señora|Sr|Sra|Signor|Signora|Dhr|Mevr|Pan|Pani'
+
+/**
+ * Once "Lars Holm" is found, a later "Mr Holm" is the same person, though the
+ * model often misses a surname on its own. Matches the surname of each found
+ * name of two or more words, only right after a title and with its capital, so
+ * "price" or "Holm" elsewhere stay as written.
+ */
+function titledSurnames(people: readonly string[]): Rule[] {
+  const surnames = new Set<string>()
+  for (const p of people) {
+    const words = p.trim().split(/\s+/)
+    const last = words.at(-1) ?? ''
+    if (words.length >= 2 && /^\p{Lu}[\p{L}\p{M}'’-]{2,}$/u.test(last)) surnames.add(last)
+  }
+  if (!surnames.size) return []
+  const escaped = [...surnames].sort((a, b) => b.length - a.length).map(v => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const re = new RegExp(`(?<=(?<![\\p{L}])(?:${SURNAME_TITLES})\\.?\\s+(?:\\p{Lu}\\.\\s*)*)(?:${escaped.join('|')})(?![\\p{L}\\p{M}])`, 'gu')
+  return [{ label: 'PERSON', scan: (text, onMatch) => text.replace(re, m => onMatch(m)), normalize: exactKey }]
 }
 
 /* ------------------------------------------------------------- placeholders */
