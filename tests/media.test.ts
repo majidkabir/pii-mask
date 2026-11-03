@@ -1,18 +1,17 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { findRules, mask, valueSpans, Vault } from '../hooks/masker'
 import { boxLabel, maskLines, pdfText, spanBoxes } from '../hooks/media'
-import { OCR_PATTERNS, PATTERNS } from '../hooks/patterns'
+import { IMAGE_PATTERNS, PATTERNS } from '../hooks/patterns'
 
-const ocrRules = () => {
-  const [email, ...rest] = OCR_PATTERNS
-  return [email!, ...PATTERNS, ...rest]
-}
+const ocrRules = () => IMAGE_PATTERNS
 
 describe('text read from an image', () => {
   const cases: [string, string, string][] = [
     ['Mail: sofie lindqvist@example. dk', 'EMAIL', 'sofie lindqvist@example. dk'],
     ['E-Mail: lukas- schneider@beispiel:. de', 'EMAIL', 'lukas- schneider@beispiel:. de'], // dots read as "-" and ":."
     ['SzaszJanka@cuvox de', 'EMAIL', 'SzaszJanka@cuvox de'], // the dot lost entirely
+    ['email? Janina Tokareva@superrito. com', 'EMAIL', 'Janina Tokareva@superrito. com'], // split at a capital
+    ['Account DK89 3704 0044 0532 0130 00 refund', 'IBAN', 'DK89 3704 0044 0532 0130 00'], // checksum fails (a misread); not a phone after "00"
     ['IBAN: DK5O00400440116243', 'IBAN', 'DK5O00400440116243'],
     ['Phone 28 47 l9 63 now', 'NUMBER', '28 47 l9 63'],
     ['CPR 14O387-1234', 'ID_NUMBER', '14O387-1234'], // the text rule for a named ID number catches it first
@@ -25,6 +24,12 @@ describe('text read from an image', () => {
       expect(v.entries().map(e => [e.label, e.value])).toContainEqual([label, value])
     })
   }
+
+  test('a name before an email in the same line stays a name, not part of the address', () => {
+    const v = new Vault('k3f9')
+    const masked = mask('Henrik Bach henrik.bach@bachbyg.dk +45 31 22 48 90', ocrRules(), v)
+    expect(masked).toMatch(/^Henrik Bach <<EMAIL_1\.k3f9>> /)
+  })
 
   test('ordinary words and short numbers stay', () => {
     const v = new Vault('k3f9')

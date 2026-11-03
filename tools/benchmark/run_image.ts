@@ -3,14 +3,14 @@
 //   v078: each line to the model on its own, masked line by line (readImage in 0.7.8)
 //   v079: the lines as one text to the model, masked by maskLines
 //   both: the model on the lines as one text and on each line, masked by maskLines (readImage since 0.7.9)
-// Patterns: the OCR email shape, the text patterns, the looser OCR patterns, then
-// the model's finds, as readImage. One fresh vault per page and way.
+// Patterns: IMAGE_PATTERNS (OCR's email and IBAN shapes, the text patterns, OCR's
+// long numbers), then the model's finds, as readImage. One fresh vault per page and way.
 //   bun run_image.ts PAGES_DIR gold.json OUT_PREFIX clean|scan   (PAGES_DIR absolute: the server opens the files)
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { findRules, mask, nerFinds, PII_LABELS, THRESHOLD, valueSpans, Vault } from '../../hooks/masker'
 import { boxLabel, maskLines, spanBoxes, type OcrLine } from '../../hooks/media'
-import { OCR_PATTERNS, PATTERNS } from '../../hooks/patterns'
+import { IMAGE_PATTERNS } from '../../hooks/patterns'
 
 const [dir, goldFile, prefix, kind = 'clean'] = process.argv.slice(2)
 const post = async (path: string, body: unknown) => {
@@ -19,8 +19,7 @@ const post = async (path: string, body: unknown) => {
   return res.json() as Promise<any>
 }
 const detect = async (texts: string[]) => (texts.length ? (await post('/detect', { texts, labels: Object.keys(PII_LABELS), threshold: THRESHOLD })).results : []) as any[]
-const [ocrEmail, ...ocrRest] = OCR_PATTERNS
-const rulesFor = (finds: ReturnType<typeof nerFinds>, vault: Vault) => [ocrEmail!, ...PATTERNS, ...ocrRest, ...findRules(finds, vault)]
+const rulesFor = (finds: ReturnType<typeof nerFinds>, vault: Vault) => [...IMAGE_PATTERNS, ...findRules(finds, vault)]
 
 const gold = (await Bun.file(goldFile!).json())[kind!] as { page: string }[]
 const out: Record<string, Record<string, unknown>> = { v078: {}, v079: {}, both: {} }

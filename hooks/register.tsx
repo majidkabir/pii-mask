@@ -33,7 +33,7 @@ import {
 } from './masker'
 import { imageText, maskLines, pdfText, type Box, type OcrLine } from './media'
 import { newerVersion } from './version'
-import { OCR_PATTERNS, PATTERNS } from './patterns'
+import { IMAGE_PATTERNS, PATTERNS } from './patterns'
 
 /*
  * Where data flows and what this mod does there:
@@ -941,12 +941,11 @@ async function readImage(
   $: EngineInterface, input: { data: string } | { path: string }, ocrMs = OCR_TIMEOUT_MS,
 ): Promise<{ masked: string[]; boxes: Box[] }> {
   const { lines } = await mediaCall<{ lines: OcrLine[] }>($, 'ocr', input, ocrMs)
-  // OCR's own email shape first ("sofie lindqvist@example. dk"), then the text patterns, then OCR's looser numbers.
-  const [ocrEmail, ...ocrRest] = OCR_PATTERNS
+  // OCR's own email and IBAN shapes first, then the text patterns, then OCR's looser numbers (IMAGE_PATTERNS).
   // The model reads the lines as one text, with their context ("Address:" on the line above), and
   // each line on its own: on the benchmark pages the two together found the most (docs/benchmark.md).
   const finds = lines.length ? await nerFind($, [lines.map(l => l.text).join('\n'), ...lines.map(l => l.text)]) : []
-  const rules = [...(ocrEmail ? [ocrEmail] : []), ...PATTERNS, ...ocrRest, ...findRules(finds, vault)]
+  const rules = [...IMAGE_PATTERNS, ...findRules(finds, vault)]
   const { masked, boxes } = maskLines(lines, rules, vault)
   return { masked, boxes }
 }
