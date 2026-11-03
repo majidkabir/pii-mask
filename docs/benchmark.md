@@ -93,4 +93,9 @@ What the image benchmark changed (0.7.9):
 - **A name wrapping onto the next line** was refused by the name check, which allowed no line break.
 - **An email whose dot OCR lost** ("anna@acme de") was covered only up to the space.
 
+Found afterwards in a recheck in a fresh Claude Code session, with a CRM screenshot and a scanned letter (0.7.10–0.7.13; the scores above are unchanged by them):
+- In a row "Henrik Bach henrik.bach@…" the email shape took the surname into the address, leaving the first name uncovered; and an address OCR split before its dot ("kari .nordmann@…") left its first part uncovered.
+- An account number that fails the IBAN checksum, as a misread one does, was half taken by the phone pattern ("0044 0532…" after "00"); OCR's IBAN shape now runs first.
+- "jonas.brix@nordfragt.dk, phone" was taken with the comma and the next word.
+
 Faces: pii-mask pixelates faces found by OpenCV's YuNet, which its authors report at 0.884 / 0.866 / 0.750 AP (easy / medium / hard) on the WIDER FACE validation set ([OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)); WIDER FACE couldn't be downloaded here to measure it again. A face filling a 1,400-pixel photo is still found.
