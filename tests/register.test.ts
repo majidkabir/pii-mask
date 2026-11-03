@@ -52,6 +52,8 @@ type World = {
   serverVersion?: string
   /** The server runs requests as jobs (0.7.9 and later). */
   jobs?: boolean
+  /** How many starts it takes before the server runs (an old one still holds the port). */
+  startsNeeded?: number
 }
 
 const FINDS: Record<string, string> = {
@@ -68,6 +70,7 @@ function world(on: On, w: World = {}) {
   const seen = { jobPolls: 0, stopped: 0, mentioned: '', read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
   let up = w.up !== false
   let serverVersion = w.serverVersion
+  let starts = 0
   const finds = w.finds ?? FINDS
 
   mock.env(on, w.windows ? { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u', LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' } : { HOME: '/home/u' })
@@ -113,7 +116,7 @@ function world(on: On, w: World = {}) {
     if (e.argv.includes('-c')) {
       return w.noPython ? { deny: 'ENOENT' } : { value: { exitCode: 0, stdout: 'True\n', stderr: '' } as never }
     }
-    if (e.argv.some(a => a.endsWith('server/server.py')) && !w.serverNeverStarts) {
+    if (e.argv.some(a => a.endsWith('server/server.py')) && !w.serverNeverStarts && ++starts >= (w.startsNeeded ?? 1)) {
       up = true
       serverVersion = w.pluginVersion
     }
@@ -415,6 +418,16 @@ describe('the local model\'s life cycle', () => {
     expect(JSON.stringify((await pending).message?.content)).toContain('PERSON_1')
     expect(seen.runs.find(r => r[0] === 'pkill')).toBeDefined()
     expect(seen.runs.some(r => r.some(a => a.endsWith('server/server.py')))).toBe(true)
+  })
+
+  test('when the old server still holds the port, the start is tried again until the new one runs', async ($, on) => {
+    const { seen, clock } = world(on, { pluginVersion: '0.7.10', serverVersion: '0.7.9', startsNeeded: 2 })
+    const pending = appendPrompt($, 'Write to Lars Holm')
+    await clock.advance(12_000)
+    await pending // held while the model starts, as any prompt then
+    expect(JSON.stringify((await appendPrompt($, 'Write to Lars Holm', 'u2')).message?.content)).toContain('PERSON_1')
+    expect(seen.stopped).toBe(1)
+    expect(seen.runs.filter(r => r.some(a => a.endsWith('server/server.py')))).toHaveLength(2)
   })
 
   test('a server that says an older version is asked to stop; the same or a newer one is kept', async ($, on) => {

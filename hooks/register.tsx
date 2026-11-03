@@ -450,12 +450,13 @@ async function startServer($: EngineInterface, python: string[], dir: string, ro
   setEngine($, 'starting', '')
   const venvPython = (await isWindows($)) ? [`${dir}\\venv\\Scripts\\python.exe`] : [`${dir}/venv/bin/python`]
   const serverPython = fake ? python : venvPython
-  await $.process.run(
-    [...serverPython, `${root}/server/server.py`, '--daemon', '--port', String(PORT), '--cache', dir, ...(fake ? ['--fake'] : [])],
-    { timeoutMs: 30_000 },
-  )
+  const argv = [...serverPython, `${root}/server/server.py`, '--daemon', '--port', String(PORT), '--cache', dir, ...(fake ? ['--fake'] : [])]
+  await $.process.run(argv, { timeoutMs: 30_000 })
   for (let waited = 0; waited < START_LIMIT_MS; waited += 1000) {
     if (await serverUp($)) return engineReady($)
+    // A server that was just asked to stop (an older version) may still hold the port, and the
+    // start above then exits at once: start again for a while. While one loads, a start exits quietly.
+    if (waited > 0 && waited % 5000 === 0 && waited <= 30_000) await $.process.run(argv, { timeoutMs: 30_000 }).catch(() => undefined)
     showEngine($) // the elapsed time keeps moving
     await $.clock.sleep(1000)
   }

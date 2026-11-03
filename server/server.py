@@ -510,7 +510,12 @@ def main():
 
     state["stop"] = stop
     server.serve_forever()
-    return 0
+    # Free the port at once and skip the slow teardown of PyTorch and the OCR model: a newer
+    # version that asked this one to stop starts its own on the same port right after.
+    server.server_close()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
