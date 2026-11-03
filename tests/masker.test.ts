@@ -44,7 +44,8 @@ describe('finds', () => {
   test('roles are not names: "The applicant", "Secretary of State", "His wife"', () => {
     const roles = ['The applicant', 'Secretary of State', 'His wife', 'the prison governor', 'Lord Chief Justice', 'Trustee in Bankruptcy', 'Registrar']
     expect(nerFinds(roles.map(text => ({ text, label: 'person' })))).toEqual([])
-    expect(nerFinds([{ text: 'Theodor Berg', label: 'person' }])).toEqual([find('Theodor Berg', 'PERSON')])
+    const names = ['Theodor Berg', 'De Vries', 'Le Bon', 'La Toya Jackson', 'Van der Berg', 'A Berg', 'Judge Dredd', 'Mother Teresa']
+    expect(nerFinds(names.map(text => ({ text, label: 'person' }))).map(f => f.value)).toEqual(names)
   })
 
   test('a found name\'s surname is masked after a title, and only there', () => {

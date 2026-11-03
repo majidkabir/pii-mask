@@ -135,7 +135,8 @@ export function looksLikeName(value: string): boolean {
   if (/^Claude(\s+(Code|Sonnet|Opus|Haiku|Fable|Mythos)\b.*)?$/.test(value)) return false
   if (value.split(/[\s.,]+/).filter(Boolean).every(w => NOT_NAMES.has(w.toLowerCase()))) return false
   // "The applicant", "His wife": a name doesn't start with an article or a possessive.
-  if (/^(the|a|an|his|her|their|my|our|your|its|this|that|der|die|das|den|dem|ein|eine|le|la|les|el|los|las|il|de|het|een)\s/i.test(value)) return false
+  // Not "de", "le", "la", "van": those start surnames (De Vries, Le Bon), and not "a" ("A Berg").
+  if (/^(the|his|her|their|my|our|your|its|this|that|these|those|die|das|ein|eine|het|een)\s/i.test(value)) return false
   if (/[^\p{L}\p{M}\p{N} .,&'’/-]/u.test(value) || value.includes('&&')) return false
   return value.split(/[\s/-]+/).every(w => !/\p{Ll}\p{Lu}/u.test(w))
 }
