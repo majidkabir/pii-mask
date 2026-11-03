@@ -4,7 +4,7 @@ name: real model
 # the server detached and checks that it finds a name, then measures its speed
 # and memory (tools/benchmark/perf.py). Takes several minutes
 # and downloads about 2 GB per machine, so it runs when the server changes,
-# weekly (new package releases), or by hand.
+# weekly (new package releases), on pushes to benchmark-* branches, or by hand.
 on:
   workflow_dispatch:
   schedule:
