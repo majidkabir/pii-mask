@@ -50,6 +50,8 @@ type World = {
   /** This mod's version (its plugin.json), and the version the running server says it came with. */
   pluginVersion?: string
   serverVersion?: string
+  /** The server runs requests as jobs (0.7.9 and later). */
+  jobs?: boolean
 }
 
 const FINDS: Record<string, string> = {
@@ -63,7 +65,7 @@ function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
   const cache = w.windows ? WIN_CACHE : CACHE
   const files: Record<string, string> = { ...(w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }), ...w.files }
-  const seen = { stopped: 0, mentioned: '', read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
+  const seen = { jobPolls: 0, stopped: 0, mentioned: '', read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
   let up = w.up !== false
   let serverVersion = w.serverVersion
   const finds = w.finds ?? FINDS
@@ -138,7 +140,7 @@ function world(on: On, w: World = {}) {
     return { value: { code: 0, signal: null } } as never
   })
   const answer = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
-  on('http.fetch', async ($, e) => {
+  const serve = async ($: unknown, e: { url: string; init?: { body?: string } }): Promise<any> => {
     if (!up) return { deny: 'connect ECONNREFUSED 127.0.0.1:8766' }
     if (e.url.endsWith('/health')) {
       const has = !w.noMedia || seen.mediaAdded
@@ -168,6 +170,28 @@ function world(on: On, w: World = {}) {
         findNow ? Object.entries(finds).filter(([v]) => t.includes(v)).map(([text, label]) => ({ text, label, score: 0.9 })) : [],
       ),
     })
+  }
+  // A server since 0.7.9 runs a request as a job when asked: 202 with its id, then
+  // GET /job/<id> (a long poll) until done. Here the first ask finds it unfinished.
+  const jobs: Record<string, { asked: boolean; status: number; body: unknown }> = {}
+  on('http.fetch', async ($, e) => {
+    const job = /\/job\/(\w+)/.exec(e.url)?.[1]
+    if (w.jobs && job) {
+      seen.jobPolls += 1
+      const j = jobs[job]
+      if (!j) return { value: { status: 404, ok: false, headers: {}, text: '{}' } }
+      if (!j.asked) {
+        j.asked = true
+        return answer({ done: false })
+      }
+      return answer({ done: true, status: j.status, body: j.body })
+    }
+    const res = await serve($, e as never)
+    const async = (JSON.parse(e.init?.body ?? '{}') as { async?: boolean }).async
+    if (!w.jobs || !async || !res.value) return res
+    const id = String(Object.keys(jobs).length + 1)
+    jobs[id] = { asked: false, status: res.value.status, body: JSON.parse(res.value.text) }
+    return { value: { status: 202, ok: true, headers: {}, text: JSON.stringify({ job: id }) } }
   })
   // What the plugin passes down: what Claude Code stores and sends. (The row the
   // test kit hands back leaves images out, as the stored transcript does.)
@@ -441,14 +465,14 @@ describe('the local model\'s life cycle', () => {
   })
 
   test('a slow web result is not removed: the patterns and known values mask it instead', async ($, on) => {
-    const { clock } = world(on, { finds: { 'Lars Holm': 'person' }, slowMs: 9000, slowAfter: 1 })
+    const { clock } = world(on, { finds: { 'Lars Holm': 'person' }, slowMs: 100_000, slowAfter: 1 })
     await appendPrompt($, 'Search for Lars Holm')
     await $.tool.call({ tool: 'WebSearch', query: 'x', tool_use_id: 'w1' } as never)
     const pending = $.session.append({
       message: { type: 'user', role: 'user', content: [{ type: 'tool_result', tool_use_id: 'w1', content: 'Results: Lars Holm, mail ' + 'jens@' + 'example.dk' }] },
       door: 'tool-result', origin: { kind: 'tool', tool: 'WebSearch' }, uuid: 'w1r',
     } as never)
-    await clock.advance(10_000)
+    await clock.advance(101_000)
     const text = JSON.stringify((await pending).message?.content)
     expect(text).not.toContain('could not check')
     expect(text).not.toContain('Lars Holm')
@@ -456,10 +480,19 @@ describe('the local model\'s life cycle', () => {
     expect(text).toContain('Results: <<PERSON_1.')
   })
 
+  test('a long request runs as a job on the server, asked for until done: Claude Code ends a request after 30 s', async ($, on) => {
+    const { seen } = world(on, { jobs: true, media: { ocr: { width: 300, height: 40, lines: [{ text: 'Lars Holm', words: [{ text: 'Lars', box: [0, 0, 40, 20], start: 0 }, { text: 'Holm', box: [50, 0, 90, 20], start: 5 }] }] } } })
+    const stored = await appendPrompt($, 'Write to Lars Holm')
+    expect(JSON.stringify(stored.message?.content)).toContain('PERSON_1')
+    expect(seen.jobPolls).toBe(2) // unfinished, then done
+    await $.tool.call({ tool: 'Read', file_path: '/proj/card.png', tool_use_id: 't9' } as never)
+    expect(seen.read).toMatch(/\.claude\/pii-mask\/read-.*\.png$/)
+  })
+
   test('a model call slower than its time limit removes the content instead of sending it', async ($, on) => {
-    const { clock } = world(on, { slowMs: 9000 })
+    const { clock } = world(on, { slowMs: 100_000 })
     const pending = appendPrompt($, 'Write to Lars Holm')
-    await clock.advance(10_000)
+    await clock.advance(101_000)
     const text = JSON.stringify((await pending).message?.content)
     expect(text).not.toContain('Lars')
     expect(text).toContain('could not check this content')
@@ -482,9 +515,9 @@ describe('the local model\'s life cycle', () => {
   })
 
   test('when the system prompt can\'t be checked in time, its sections are removed but the note is still sent', async ($, on) => {
-    const { clock } = world(on, { slowMs: 9000, sections: [{ id: 'env', text: 'Working on Lars Holm\'s laptop', scope: 'session' }] })
+    const { clock } = world(on, { slowMs: 100_000, sections: [{ id: 'env', text: 'Working on Lars Holm\'s laptop', scope: 'session' }] })
     const pending = $.prompt.compose(COMPOSE)
-    await clock.advance(10_000)
+    await clock.advance(101_000)
     const { sections } = await pending
     expect(JSON.stringify(sections)).not.toContain('Lars')
     expect(sections.at(-1)?.id).toBe('pii-mask:note')

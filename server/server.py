@@ -60,9 +60,16 @@ def peak_rss_mb():
                             ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
                             ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
 
+            # Declared, or the 64-bit process handle is cut to 32 bits and the call reads nothing.
+            current = ctypes.windll.kernel32.GetCurrentProcess
+            current.restype = wintypes.HANDLE
+            info = ctypes.windll.psapi.GetProcessMemoryInfo
+            info.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+            info.restype = wintypes.BOOL
             c = Counters()
             c.cb = ctypes.sizeof(c)
-            ctypes.windll.psapi.GetProcessMemoryInfo(ctypes.windll.kernel32.GetCurrentProcess(), ctypes.byref(c), c.cb)
+            if not info(current(), ctypes.byref(c), c.cb):
+                return None
             return round(c.PeakWorkingSetSize / (1024 * 1024))
         except Exception:
             return None
@@ -215,7 +222,96 @@ class Detector:
         return results
 
 
+class Jobs:
+    """Requests run in the background: Claude Code ends a plugin's HTTP request
+    after 30 s, and a long file or a dense scanned page can take longer on a
+    slow machine. The mod starts a job and asks for it until it is done, each
+    request short. Finished jobs are kept 10 minutes."""
+
+    KEEP = 600
+
+    def __init__(self):
+        self.jobs = {}
+        self.lock = threading.Lock()
+        self.ids = itertools.count(1)
+
+    def start(self, work):
+        job = str(next(self.ids))
+        with self.lock:
+            now = time.time()
+            for k in [k for k, j in self.jobs.items() if j["done"] and now - j["at"] > self.KEEP]:
+                del self.jobs[k]
+            self.jobs[job] = {"done": False, "at": now, "event": threading.Event()}
+
+        def run():
+            try:
+                status, body = work()
+            except Exception as err:  # never leave a job unfinished
+                status, body = 500, {"error": f"{type(err).__name__}: {err}"}
+            with self.lock:
+                event = self.jobs[job]["event"]
+                self.jobs[job] = {"done": True, "at": time.time(), "status": status, "body": body, "event": event}
+            event.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        return job
+
+    def get(self, job, wait=0.0):
+        """The job, once done or after `wait` seconds (a long poll: the caller
+        needs no timer of its own between asks)."""
+        with self.lock:
+            j = self.jobs.get(job)
+        if j and not j["done"] and wait > 0:
+            j["event"].wait(min(wait, 25))
+        with self.lock:
+            j = self.jobs.get(job)
+            if j and j["done"]:
+                del self.jobs[job]  # answered once
+            return j
+
+
 def make_handler(backend, state, media=None):
+    jobs = Jobs()
+
+    def detect(req):
+        texts, labels = req["texts"], req["labels"]
+        threshold = float(req.get("threshold", 0.5))
+        if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
+            raise ValueError("texts must be a list of strings")
+        return 200, {"results": backend.detect(texts, labels, threshold)}
+
+    def media_work(kind, req, status):
+        """POST /media/pdf {data, render?, maxPages?}, /media/ocr {data},
+        /media/redact {data, boxes, faces?}, /media/topdf {images, out}; data is
+        base64 both ways, or `path`, a file on this machine."""
+        data = None if kind == "topdf" else (
+            open(req["path"], "rb").read() if req.get("path") else base64.b64decode(req["data"]))
+        out_path = req.get("out")
+        if kind == "topdf":
+            pdf = media.to_pdf([base64.b64decode(i) for i in req["images"]])
+            write_file(out_path, pdf)
+            return 200, {"out": out_path, "bytes": len(pdf)}
+        if kind == "pdf":
+            out = media.pdf(data, render=bool(req.get("render")), max_pages=int(req.get("maxPages", 5)))
+            out["images"] = [base64.b64encode(i).decode() for i in out["images"]]
+            return 200, out
+        if kind == "ocr":
+            return 200, media.ocr(data)
+        out = media.redact(data, req.get("boxes") or [], blur_faces=bool(req.get("faces")) and status.get("faces"))
+        if out_path:  # written where the caller asked (a copy for Claude Code's Read tool)
+            write_file(out_path, out.pop("data"))
+            out["out"] = out_path
+        else:
+            out["data"] = base64.b64encode(out["data"]).decode()
+        return 200, out
+
+    def guarded(work):
+        try:
+            return work()
+        except (ValueError, KeyError, TypeError) as err:
+            return 400, {"error": str(err)}
+        except Exception as err:  # a file the libraries can't read
+            return 422, {"error": f"{type(err).__name__}: {err}"}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # never log what was sent
@@ -236,76 +332,55 @@ def make_handler(backend, state, media=None):
                 if media is not None:
                     body["media"] = media.status()
                 self.answer(200, body)
+            elif self.path.startswith("/job/"):
+                job, _, query = self.path[len("/job/"):].partition("?")
+                wait = float(dict(p.split("=", 1) for p in query.split("&") if "=" in p).get("wait", 0) or 0)
+                j = jobs.get(job, wait)
+                if j is None:
+                    self.answer(404, {"error": "no such job"})
+                elif not j["done"]:
+                    self.answer(200, {"done": False})
+                else:
+                    self.answer(200, {"done": True, "status": j["status"], "body": j["body"]})
             else:
                 self.answer(404, {"error": "not found"})
 
         def do_POST(self):
             state["last"] = time.time()
-            if self.path.startswith("/media/"):
-                return self.media()
             if self.path == "/stop":  # a newer version of the mod replaces this server
                 self.answer(200, {"stopping": True})
                 if state.get("stop"):
                     state["stop"]()
                 return
-            if self.path != "/detect":
+            if self.path == "/detect":
+                work = detect
+            elif self.path.startswith("/media/"):
+                kind = self.path[len("/media/"):]
+                if media is None or kind not in ("pdf", "ocr", "redact", "topdf"):
+                    return self.answer(404, {"error": "not found"})
+                need = {"pdf": "pdf", "ocr": "images", "redact": "images", "topdf": "pdf"}[kind]
+                status = media.status()
+                if not status.get(need) and not (kind == "redact" and status.get("faces")):
+                    return self.answer(503, {"error": f"{need} support is not installed"})
+                work = lambda req, kind=kind, status=status: media_work(kind, req, status)
+            else:
                 return self.answer(404, {"error": "not found"})
             length = int(self.headers.get("content-length") or 0)
             if length > MAX_BODY:
                 return self.answer(413, {"error": "request too large"})
             try:
                 req = json.loads(self.rfile.read(length))
-                texts, labels = req["texts"], req["labels"]
-                threshold = float(req.get("threshold", 0.5))
-                if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
-                    raise ValueError("texts must be a list of strings")
-            except (ValueError, KeyError, TypeError) as err:
+            except ValueError as err:
                 return self.answer(400, {"error": str(err)})
-            results = backend.detect(texts, labels, threshold)
-            state["last"] = time.time()
-            self.answer(200, {"results": results})
 
-        def media(self):
-            """POST /media/pdf {data, render?, maxPages?}, /media/ocr {data},
-            /media/redact {data, boxes, faces?}; data is base64 both ways."""
-            kind = self.path[len("/media/"):]
-            if media is None or kind not in ("pdf", "ocr", "redact", "topdf"):
-                return self.answer(404, {"error": "not found"})
-            need = {"pdf": "pdf", "ocr": "images", "redact": "images", "topdf": "pdf"}[kind]
-            status = media.status()
-            if not status.get(need) and not (kind == "redact" and status.get("faces")):
-                return self.answer(503, {"error": f"{need} support is not installed"})
-            length = int(self.headers.get("content-length") or 0)
-            if length > MAX_BODY:
-                return self.answer(413, {"error": "request too large"})
-            try:
-                req = json.loads(self.rfile.read(length))
-                # The file's bytes as base64, or the path of a file on this machine.
-                data = None if kind == "topdf" else (
-                    open(req["path"], "rb").read() if req.get("path") else base64.b64decode(req["data"]))
-                out_path = req.get("out")
-                if kind == "topdf":
-                    pdf = media.to_pdf([base64.b64decode(i) for i in req["images"]])
-                    write_file(out_path, pdf)
-                    out = {"out": out_path, "bytes": len(pdf)}
-                elif kind == "pdf":
-                    out = media.pdf(data, render=bool(req.get("render")), max_pages=int(req.get("maxPages", 5)))
-                    out["images"] = [base64.b64encode(i).decode() for i in out["images"]]
-                elif kind == "ocr":
-                    out = media.ocr(data)
-                else:
-                    out = media.redact(data, req.get("boxes") or [], blur_faces=bool(req.get("faces")) and status.get("faces"))
-                    if out_path:  # written where the caller asked (a copy for Claude Code's Read tool)
-                        write_file(out_path, out.pop("data"))
-                        out["out"] = out_path
-                    else:
-                        out["data"] = base64.b64encode(out["data"]).decode()
-            except (ValueError, KeyError, TypeError) as err:
-                return self.answer(400, {"error": str(err)})
-            except Exception as err:  # a file the libraries can't read
-                return self.answer(422, {"error": f"{type(err).__name__}: {err}"})
-            state["last"] = time.time()
-            self.answer(200, out)
+            def run():
+                result = guarded(lambda: work(req))
+                state["last"] = time.time()
+                return result
+
+            if req.get("async"):  # a job: the answer comes from GET /job/<id>
+                return self.answer(202, {"job": jobs.start(run)})
+            self.answer(*run())
 
     return Handler
 

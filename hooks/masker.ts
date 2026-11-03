@@ -137,7 +137,8 @@ export function looksLikeName(value: string): boolean {
   // "The applicant", "His wife": a name doesn't start with an article or a possessive.
   // Not "de", "le", "la", "van": those start surnames (De Vries, Le Bon), and not "a" ("A Berg").
   if (/^(the|his|her|their|my|our|your|its|this|that|these|those|die|das|ein|eine|het|een)\s/i.test(value)) return false
-  if (/[^\p{L}\p{M}\p{N} .,&'’/-]/u.test(value) || value.includes('&&')) return false
+  // A name may wrap onto the next line (a scanned page): one line break, no other control characters.
+  if (/[^\p{L}\p{M}\p{N} \n.,&'’/-]/u.test(value) || value.includes('&&') || (value.match(/\n/g) ?? []).length > 1) return false
   return value.split(/[\s/-]+/).every(w => !/\p{Ll}\p{Lu}/u.test(w))
 }
 

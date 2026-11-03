@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 
-from server import BATCH, Detector, Gate
+from server import BATCH, Detector, Fake, Gate, make_handler
 
 
 class Counting:
@@ -111,3 +111,37 @@ class InkBoxTest(unittest.TestCase):
         ImageDraw.Draw(img).rectangle([100, 200, 300, 260], fill="black")
         self.assertEqual(ink_box(img), (84, 184, 317, 277))
         self.assertEqual(ink_box(Image.new("RGB", (50, 40), "white")), (0, 0, 50, 40))
+
+
+class JobsTest(unittest.TestCase):
+    def test_a_long_request_runs_as_a_job_answered_by_a_long_poll(self):
+        import json
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+
+        class Slow(Fake):
+            def predict(self, texts, labels, threshold):
+                time.sleep(0.3)
+                return super().predict(texts, labels, threshold)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Detector(Slow(None)), {"last": time.time()}))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            body = json.dumps({"texts": ["Write to Lars Holm"], "labels": ["person"], "async": True}).encode()
+            with urllib.request.urlopen(urllib.request.Request(base + "/detect", body, {"content-type": "application/json"})) as r:
+                self.assertEqual(r.status, 202)
+                job = json.loads(r.read())["job"]
+            with urllib.request.urlopen(f"{base}/job/{job}?wait=0") as r:
+                self.assertEqual(json.loads(r.read()), {"done": False})
+            t = time.time()
+            with urllib.request.urlopen(f"{base}/job/{job}?wait=5") as r:
+                answer = json.loads(r.read())
+            self.assertLess(time.time() - t, 2)  # answered when done, not after the full wait
+            self.assertEqual(answer["status"], 200)
+            self.assertEqual(answer["body"]["results"][0][0]["text"], "Lars Holm")
+            with self.assertRaises(urllib.error.HTTPError):  # answered once
+                urllib.request.urlopen(f"{base}/job/{job}")
+        finally:
+            server.shutdown()
+

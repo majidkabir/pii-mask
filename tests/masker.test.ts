@@ -58,7 +58,7 @@ describe('finds', () => {
 
   test('shapes: each label keeps only finds that can be what it says', () => {
     const cases: [string, string, boolean][] = [
-      ['onMatch', 'person', false], ['RAW_FIELDS', 'person', false], ['lars', 'person', false], ['Mette Sørensen', 'person', true],
+      ['onMatch', 'person', false], ['RAW_FIELDS', 'person', false], ['lars', 'person', false], ['Mette Sørensen', 'person', true], ['Robert Edward\nHill', 'person', true], ['Anna\nBerg\nHolm', 'person', false],
       ['lars@holm.dk', 'email', true], ['holm.dk', 'email', false],
       ['+45 12 34 56 78', 'phone number', true], ['call me', 'phone number', false], ['v1.2', 'phone number', false],
       ['DK50 0040 0440 1162 43', 'iban', true], ['DK50', 'iban', false],

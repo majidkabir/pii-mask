@@ -55,8 +55,14 @@ import { OCR_PATTERNS, PATTERNS } from './patterns'
 const NAME = 'pii-mask'
 const PORT = 8766
 const BASE = `http://127.0.0.1:${PORT}`
-/** Longest one NER call may take. A hook has 10 s in all. */
-const NER_TIMEOUT_MS = 7000
+/**
+ * Longest one model call may take. A hook's 10 s count only its own code, not
+ * its calls to the local server (HookBudget), so this bounds how long a row
+ * waits, not the hook. The model reads 1,400–2,900 characters a second on
+ * GitHub's machines: a 64 KB file read takes 22–44 s the first time (cached
+ * after), and would otherwise be removed instead of masked.
+ */
+const NER_TIMEOUT_MS = 90_000
 /** How long a hook waits for a model that is starting (loaded from disk, not installed). */
 const WAIT_FOR_START_MS = 6000
 /** How long the model may take to load before the start counts as failed. */
@@ -547,16 +553,42 @@ async function needEngine($: EngineInterface): Promise<void> {
   if (state() !== 'ready') throw new Error(blocked())
 }
 
+/**
+ * A request to the local server, run there as a job. Claude Code ends a
+ * plugin's HTTP request after 30 s, and a long file or a dense scanned page can
+ * take longer on a slow machine (a 64 KB file: 22–44 s on GitHub's machines).
+ * The job is started, then asked for with long polls of at most 20 s that the
+ * server answers as soon as it is done, so no request nears the limit and the
+ * hook keeps no timer between asks (a hook's own waits count against its 10 s;
+ * its calls don't). A server from before 0.7.9 answers at once instead.
+ */
+async function serverCall(
+  $: EngineInterface, path: string, body: Record<string, unknown>, ms: number,
+): Promise<{ ok: boolean; status: number; text: string }> {
+  let stopped = false
+  const run = async () => {
+    const res = await $.http.fetch(`${BASE}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, async: true }),
+    })
+    if (res.status !== 202) return res
+    const { job } = JSON.parse(res.text) as { job: string }
+    while (!stopped) {
+      const r = await $.http.fetch(`${BASE}/job/${job}?wait=20`)
+      if (!r.ok) throw new Error(`the model server lost job ${job} (HTTP ${r.status})`)
+      const j = JSON.parse(r.text) as { done: boolean; status?: number; body?: unknown }
+      if (j.done) return { ok: (j.status ?? 500) < 300, status: j.status ?? 500, text: JSON.stringify(j.body) }
+    }
+    throw new Error('stopped')
+  }
+  try {
+    return await withTimeout($, run(), ms)
+  } finally {
+    stopped = true
+  }
+}
+
 async function detect($: EngineInterface, texts: readonly string[]): Promise<NerEntity[][]> {
-  const res = await withTimeout(
-    $,
-    $.http.fetch(`${BASE}/detect`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ texts, labels: LABELS, threshold: THRESHOLD }),
-    }),
-    NER_TIMEOUT_MS,
-  )
+  const res = await serverCall($, '/detect', { texts, labels: LABELS, threshold: THRESHOLD }, NER_TIMEOUT_MS)
   if (!res.ok) throw new Error(`the model server answered HTTP ${res.status}`)
   const results = (JSON.parse(res.text) as { results?: unknown }).results
   if (!Array.isArray(results) || results.length !== texts.length || !results.every(Array.isArray)) {
@@ -803,12 +835,8 @@ async function freshMediaStatus($: EngineInterface): Promise<MediaStatus> {
   return mediaStatus
 }
 
-async function mediaCall<T>($: EngineInterface, kind: string, body: unknown, ms: number): Promise<T> {
-  const res = await withTimeout(
-    $,
-    $.http.fetch(`${BASE}/media/${kind}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
-    ms,
-  )
+async function mediaCall<T>($: EngineInterface, kind: string, body: Record<string, unknown>, ms: number): Promise<T> {
+  const res = await serverCall($, `/media/${kind}`, body, ms)
   if (!res.ok) throw new Error(`${kind}: HTTP ${res.status}`)
   return JSON.parse(res.text) as T
 }
@@ -915,8 +943,9 @@ async function readImage(
   const { lines } = await mediaCall<{ lines: OcrLine[] }>($, 'ocr', input, ocrMs)
   // OCR's own email shape first ("sofie lindqvist@example. dk"), then the text patterns, then OCR's looser numbers.
   const [ocrEmail, ...ocrRest] = OCR_PATTERNS
-  // The model reads the lines as one text, with their context ("Address:" on the line above).
-  const finds = lines.length ? await nerFind($, [lines.map(l => l.text).join('\n')]) : []
+  // The model reads the lines as one text, with their context ("Address:" on the line above), and
+  // each line on its own: on the benchmark pages the two together found the most (docs/benchmark.md).
+  const finds = lines.length ? await nerFind($, [lines.map(l => l.text).join('\n'), ...lines.map(l => l.text)]) : []
   const rules = [...(ocrEmail ? [ocrEmail] : []), ...PATTERNS, ...ocrRest, ...findRules(finds, vault)]
   const { masked, boxes } = maskLines(lines, rules, vault)
   return { masked, boxes }
@@ -929,14 +958,14 @@ const PDF_FILE = /\.pdf$/i
 /**
  * Time for making a covered copy. A hook's 10 s count only its own code, not
  * its calls to the local server, so this is a bound on how long Claude waits,
- * not on the hook: OCR of an A4 page takes 2–8 s on a slow machine, and reads
+ * not on the hook: OCR of a dense A4 page takes 20–33 s on GitHub's machines, and reads
  * Claude makes at once queue for it.
  */
-const READ_BUDGET_MS = 45_000
+const READ_BUDGET_MS = 150_000
 /** Longest one OCR call may take. */
-const OCR_TIMEOUT_MS = 20_000
+const OCR_TIMEOUT_MS = 60_000
 /** All a mention may take, waiting for the model included; past it the mention is refused. */
-const MENTION_BUDGET_MS = 50_000
+const MENTION_BUDGET_MS = 155_000
 /** WebSearch and WebFetch calls, by tool_use_id: their results get the patterns if the model is too slow. */
 const webCalls = new Set<string>()
 /** Reads pointed at a redacted copy: by tool_use_id, the original path and the masked text to add. */
