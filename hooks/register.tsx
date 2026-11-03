@@ -893,6 +893,8 @@ async function readImage($: EngineInterface, input: { data: string } | { path: s
 
 const IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i
 const PDF_FILE = /\.pdf$/i
+/** WebSearch and WebFetch calls, by tool_use_id: their results get the patterns if the model is too slow. */
+const webCalls = new Set<string>()
 /** Reads pointed at a redacted copy: by tool_use_id, the original path and the masked text to add. */
 const readCopies = new Map<string, { original: string; text: string }>()
 /** Redacted copy → the path Claude asked for, so the tool row shows the file you know. */
@@ -1070,7 +1072,14 @@ export const register: Register = on => {
     // get the patterns and known values instead of being removed, so the
     // screen doesn't lose them right after installing.
     const own = (e.door === 'command' || e.door === 'notice') && engine.state !== 'ready'
-    const rules = !texts.length ? [] : reply || own || isOwnRow(texts) ? [...PATTERNS, ...findRules([], vault)] : await rulesFor($, texts)
+    const known = () => [...PATTERNS, ...findRules([], vault)]
+    // Web results are public pages fetched for a query that kept its placeholders;
+    // they are often long, so if the model can't check them in time, the patterns
+    // and every value found so far do, instead of the result being removed.
+    const web = (e.message.content as Block[]).some(b => b.type === 'tool_result' && webCalls.has(String(b.tool_use_id)))
+    const rules = !texts.length ? [] : reply || own || isOwnRow(texts) ? known()
+      : web ? await rulesFor($, texts).catch(() => known())
+      : await rulesFor($, texts)
     const content = maskContent(prepared, rules)
     await persist($, before)
     return next({ ...e, message: { ...e.message, content } })
@@ -1171,6 +1180,7 @@ export const register: Register = on => {
   // tools that would send them off this machine (web tools, every MCP tool).
   on('tool.call', async ($, e, next) => {
     await ready($)
+    if (e.tool === 'WebSearch' || e.tool === 'WebFetch') webCalls.add(String(e.tool_use_id ?? ''))
     const call = keepsPlaceholders(String(e.tool)) ? e : unmaskDeep(e, vault, TOOL_ENVELOPE)
     if (e.tool === 'Read' && engine.state === 'ready') {
       const path = String((call as { file_path?: unknown }).file_path ?? '')
@@ -1285,7 +1295,7 @@ export const register: Register = on => {
       return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, /pii-mask media, or /pii-mask retry.') }
     }
     if (arg === '') {
-      const opened = await $.ui.open({ id: PANE, title: 'Masked by pii-mask' })
+      const opened = await $.ui.open({ id: PANE, title: 'Masked by pii-mask', focus: true })
       if (opened.isPlaced) return { text: own(`Opened the pii-mask pane: ${vault.size} value(s) masked so far.`) }
     }
     const dir = engine.cache || (await cacheDir($))
@@ -1322,7 +1332,7 @@ export const register: Register = on => {
         {(view.state === 'failed' || view.state === 'off') && !block && (
           <Box flexDirection="row" gap={2}>
             <Button key="retry" label="Retry" onPress={() => { setEngine($, 'unknown', ''); void startEngine($, true) }} />
-            <Button key="details" label="Details" onPress={() => { void $.ui.open({ id: PANE, title: 'Masked by pii-mask' }) }} />
+            <Button key="details" label="Details" onPress={() => { void $.ui.open({ id: PANE, title: 'Masked by pii-mask', focus: true }) }} />
           </Box>
         )}
       </Box>

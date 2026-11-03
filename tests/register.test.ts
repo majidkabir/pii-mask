@@ -25,8 +25,10 @@ type World = {
   installed?: boolean
   /** No Python on the PATH. */
   noPython?: boolean
-  /** Each /detect takes this long (on the mocked clock). */
+  /** Each /detect takes this long (on the mocked clock)... */
   slowMs?: number
+  /** ...after this many quick ones. */
+  slowAfter?: number
   /** The setup script never finishes (it is still downloading). */
   setupHangs?: boolean
   /** The setup script fails, with this reason and fix. */
@@ -139,7 +141,7 @@ function world(on: On, w: World = {}) {
     }
     seen.detects += 1
     const { texts } = JSON.parse(e.init?.body ?? '{}') as { texts: string[] }
-    if (w.slowMs) await clock.sleep(w.slowMs)
+    if (w.slowMs && seen.detects > (w.slowAfter ?? 0)) await clock.sleep(w.slowMs)
     const findNow = !w.onlyFirstCall || seen.detects === 1
     return answer({
       results: texts.map(t =>
@@ -393,6 +395,22 @@ describe('the local model\'s life cycle', () => {
     expect(seen.requestSent).toBe(false)
   })
 
+  test('a slow web result is not removed: the patterns and known values mask it instead', async ($, on) => {
+    const { clock } = world(on, { finds: { 'Lars Holm': 'person' }, slowMs: 9000, slowAfter: 1 })
+    await appendPrompt($, 'Search for Lars Holm')
+    await $.tool.call({ tool: 'WebSearch', query: 'x', tool_use_id: 'w1' } as never)
+    const pending = $.session.append({
+      message: { type: 'user', role: 'user', content: [{ type: 'tool_result', tool_use_id: 'w1', content: 'Results: Lars Holm, mail ' + 'jens@' + 'example.dk' }] },
+      door: 'tool-result', origin: { kind: 'tool', tool: 'WebSearch' }, uuid: 'w1r',
+    } as never)
+    await clock.advance(10_000)
+    const text = JSON.stringify((await pending).message?.content)
+    expect(text).not.toContain('could not check')
+    expect(text).not.toContain('Lars Holm')
+    expect(text).not.toContain('jens@')
+    expect(text).toContain('Results: <<PERSON_1.')
+  })
+
   test('a model call slower than its time limit removes the content instead of sending it', async ($, on) => {
     const { clock } = world(on, { slowMs: 9000 })
     const pending = appendPrompt($, 'Write to Lars Holm')
@@ -496,12 +514,12 @@ describe('the pane', () => {
     world(on)
     let opened = ''
     on('ui.open', ($2, e) => {
-      opened = e.id
+      opened = e.id + (e.focus ? ' (raised)' : '')
       return { value: { isPlaced: true } } as never
     })
     await appendPrompt($, 'Lars Holm')
     const a = await $.command.run({ command: 'pii-mask', args: '' } as never)
-    expect(opened).toBe('pii-mask')
+    expect(opened).toBe('pii-mask (raised)') // in front of other panes, such as Claude Code's own
     expect(JSON.stringify(a)).toContain('Opened the pii-mask pane: 1 value(s) masked')
     const b = await $.command.run({ command: 'pii-mask', args: 'status' } as never)
     expect(JSON.stringify(b)).toContain('Values masked: 1')
