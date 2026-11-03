@@ -197,12 +197,13 @@ export const PATTERNS: readonly PatternRule[] = [
  * a word, so these catch the shape without the checks the text patterns make.
  */
 export const OCR_PATTERNS: readonly PatternRule[] = [
-  // Anything with an @ between words; OCR reads the dots as ". ", ":." or ",".
+  // Anything with an @ between words; OCR reads the dots as ". ", ":." or "," (a comma only with
+  // no space after it: in "jonas@acme.dk, phone" the comma ends the address).
   // A dot OCR lost entirely leaves a space before the last part: "anna@acme dk".
   // Two words before the @ ("sofie lindqvist@", "Janina Tokareva@": OCR split the address at a lost
   // dot or a capital, "kari .nordmann@") only when the second has no separator inside it: in
   // "Henrik Bach henrik.bach@..." the address is whole and the surname before it is not part of it.
-  whole('email (OCR)', 'EMAIL', /(?<![\w.+-])(?:[A-Za-z0-9._%+-]+ (?=[._-]?[A-Za-z0-9%+]+ ?@))?[A-Za-z0-9._%+-]+ ?@ ?[A-Za-z0-9-]+(?: ?[.,:;]{1,2} ?[A-Za-z0-9-]+)*(?: (?:[a-z]{2}|com|org|net|edu|gov|info|biz)(?![\w@]))?/g,
+  whole('email (OCR)', 'EMAIL', /(?<![\w.+-])(?:[A-Za-z0-9._%+-]+ (?=[._-]?[A-Za-z0-9%+]+ ?@))?[A-Za-z0-9._%+-]+ ?@ ?[A-Za-z0-9-]+(?: ?[.:;]{1,2} ?[A-Za-z0-9-]+| ?,[A-Za-z0-9-]+)*(?: (?:[a-z]{2}|com|org|net|edu|gov|info|biz)(?![\w@]))?/g,
     v => /[A-Za-z0-9] ?@ ?[A-Za-z0-9-]{2,}/.test(v)),
   whole('IBAN (OCR)', 'IBAN', /\b[A-Z]{2}[0-9OIl]{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g),
   // Any long number: phone, account, ID, card, read with O, I or l for a digit.

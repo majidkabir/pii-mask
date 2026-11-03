@@ -26,6 +26,11 @@ describe('text read from an image', () => {
     })
   }
 
+  test('a comma and a word after an email are not part of it', () => {
+    const v = new Vault('k3f9')
+    expect(mask('mail jonas brix@nordfragt.dk, phone +45 26 71 90 13', ocrRules(), v)).toMatch(/^mail <<EMAIL_1\.k3f9>>, phone /)
+  })
+
   test('a name before an email in the same line stays a name, not part of the address', () => {
     const v = new Vault('k3f9')
     const masked = mask('Henrik Bach henrik.bach@bachbyg.dk +45 31 22 48 90', ocrRules(), v)
