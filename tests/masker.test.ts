@@ -34,6 +34,13 @@ describe('finds', () => {
     ).toEqual([find('Lars Holm', 'PERSON'), find('123456-7890', 'ID_NUMBER'), find('987654-3210', 'ID_NUMBER')])
   })
 
+  test('a title before a name is left out, so the person has one placeholder', () => {
+    expect(nerFinds([
+      { text: 'Herr Jörg Müller', label: 'person' }, { text: 'Dr. Anna Berg', label: 'person' }, { text: 'Mrs Holm', label: 'person' },
+      { text: 'Herr', label: 'person' },
+    ])).toEqual([find('Jörg Müller', 'PERSON'), find('Anna Berg', 'PERSON'), find('Holm', 'PERSON')])
+  })
+
   test('shapes: each label keeps only finds that can be what it says', () => {
     const cases: [string, string, boolean][] = [
       ['onMatch', 'person', false], ['RAW_FIELDS', 'person', false], ['lars', 'person', false], ['Mette Sørensen', 'person', true],

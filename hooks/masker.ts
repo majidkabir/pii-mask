@@ -158,12 +158,17 @@ const SHAPE: Record<string, (v: string) => boolean> = {
  * the threshold left out, and dropped when they can't be what the label says,
  * are one of Claude Code's own words, or are (part of) a placeholder.
  */
+/** Titles before a name, in the languages the model reads. */
+const TITLES = /^(?:(?:herr|frau|hr|fr|fru|mr|mrs|ms|miss|mx|dr|prof|sir|madam|monsieur|madame|mme|mlle|señor|señora|sr|sra|signor|signora|sig|dhr|mevr|pan|pani)\.?\s+)+/iu
+
 export function nerFinds(entities: readonly NerEntity[]): NerFind[] {
   const ignore = new Set([...ALWAYS_IGNORED, ...LABEL_WORDS].map(exactKey))
   const out: NerFind[] = []
   for (const e of entities) {
     const label = PII_LABELS[e.label]
-    const value = typeof e.text === 'string' ? e.text.trim().replace(/^[\s"'`([{<]+|[\s"'`)\]}>,;:]+$/g, '') : ''
+    let value = typeof e.text === 'string' ? e.text.trim().replace(/^[\s"'`([{<]+|[\s"'`)\]}>,;:]+$/g, '') : ''
+    // "Herr Jörg Müller" and "Jörg Müller" are one person: one placeholder, the title left as written.
+    if (label === 'PERSON') value = value.replace(TITLES, '')
     if (!label || value.replace(/[^\p{L}\p{N}]/gu, '').length < 2) continue
     if (typeof e.score === 'number' && e.score < THRESHOLD) continue
     if (value.includes('<<') || value.includes('>>') || ignore.has(exactKey(value))) continue
