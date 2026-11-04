@@ -1,0 +1,18 @@
+# GitHub Pages site (https://majidkabir.github.io/pii-mask/): the README and docs as pages,
+# with a sitemap for search engines.
+title: pii-mask
+description: Claude Code plugin that keeps personal data on your machine. A local AI model swaps names, emails, phone numbers, IBANs and ID numbers for placeholders before anything reaches Claude.
+url: https://majidkabir.github.io
+baseurl: /pii-mask
+plugins:
+  - jekyll-sitemap
+  - jekyll-seo-tag
+exclude:
+  - hooks
+  - server
+  - tests
+  - types
+  - tools/benchmark/*.py
+  - tools/benchmark/*.ts
+  - "*.tsx"
+  - tsconfig.json
