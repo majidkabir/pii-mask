@@ -3,14 +3,14 @@
 //   v078: each line to the model on its own, masked line by line (readImage in 0.7.8)
 //   v079: the lines as one text to the model, masked by maskLines
 //   both: the model on the lines as one text and on each line, masked by maskLines (readImage since 0.7.9)
-// Patterns: IMAGE_PATTERNS (OCR's email and IBAN shapes, the text patterns, OCR's
-// long numbers), then the model's finds, as readImage. One fresh vault per page and way.
+// Patterns: imagePatterns (an ID's machine-readable lines, OCR's email and IBAN shapes, the text
+// patterns, OCR's long numbers; every date when the page names a birth date), then the model's finds, as readImage. One fresh vault per page and way.
 //   bun run_image.ts PAGES_DIR gold.json OUT_PREFIX clean|scan   (PAGES_DIR absolute: the server opens the files)
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { findRules, mask, nerFinds, PII_LABELS, THRESHOLD, valueSpans, Vault } from '../../hooks/masker'
 import { boxLabel, maskLines, spanBoxes, type OcrLine } from '../../hooks/media'
-import { IMAGE_PATTERNS } from '../../hooks/patterns'
+import { imagePatterns } from '../../hooks/patterns'
 
 const [dir, goldFile, prefix, kind = 'clean'] = process.argv.slice(2)
 const post = async (path: string, body: unknown) => {
@@ -19,7 +19,7 @@ const post = async (path: string, body: unknown) => {
   return res.json() as Promise<any>
 }
 const detect = async (texts: string[]) => (texts.length ? (await post('/detect', { texts, labels: Object.keys(PII_LABELS), threshold: THRESHOLD })).results : []) as any[]
-const rulesFor = (finds: ReturnType<typeof nerFinds>, vault: Vault) => [...IMAGE_PATTERNS, ...findRules(finds, vault)]
+const rulesFor = (finds: ReturnType<typeof nerFinds>, vault: Vault, text: string) => [...imagePatterns(text), ...findRules(finds, vault)]
 
 const gold = (await Bun.file(goldFile!).json())[kind!] as { page: string }[]
 const out: Record<string, Record<string, unknown>> = { v078: {}, v079: {}, both: {} }
@@ -42,7 +42,7 @@ for (const { page } of gold) {
     const t = Date.now()
     const vault = new Vault('bnch')
     const results = await detect(lines.map(l => l.text))
-    const rules = rulesFor(lines.flatMap((_, i) => nerFinds(results[i] ?? [])), vault)
+    const rules = rulesFor(lines.flatMap((_, i) => nerFinds(results[i] ?? [])), vault, lines.map(l => l.text).join('\n'))
     const boxes: number[][] = []
     for (const line of lines) {
       const m = mask(line.text, rules, vault)
@@ -55,7 +55,7 @@ for (const { page } of gold) {
     const t = Date.now()
     const vault = new Vault('bnch')
     const results = await detect(lines.length ? [lines.map(l => l.text).join('\n')] : [])
-    const boxes = maskLines(lines, rulesFor(nerFinds(results[0] ?? []), vault), vault).boxes.map(b => b.box)
+    const boxes = maskLines(lines, rulesFor(nerFinds(results[0] ?? []), vault, lines.map(l => l.text).join('\n')), vault).boxes.map(b => b.box)
     out.v079![page] = { boxes, ms: ocr.ms + Date.now() - t, ...meta }
   }
   {
@@ -64,7 +64,7 @@ for (const { page } of gold) {
     const joined = await detect(lines.length ? [lines.map(l => l.text).join('\n')] : [])
     const perLine = await detect(lines.map(l => l.text))
     const finds = [...nerFinds(joined[0] ?? []), ...lines.flatMap((_, i) => nerFinds(perLine[i] ?? []))]
-    const boxes = maskLines(lines, rulesFor(finds, vault), vault).boxes.map(b => b.box)
+    const boxes = maskLines(lines, rulesFor(finds, vault, lines.map(l => l.text).join('\n')), vault).boxes.map(b => b.box)
     out.both![page] = { boxes, ms: ocr.ms + Date.now() - t, ...meta }
   }
   if (++n % 10 === 0) console.error(`${kind} ${n}/${gold.length} pages, ${((Date.now() - t0) / 1000).toFixed(0)} s`)

@@ -206,14 +206,42 @@ export const OCR_PATTERNS: readonly PatternRule[] = [
   whole('email (OCR)', 'EMAIL', /(?<![\w.+-])(?:[A-Za-z0-9._%+-]+ (?=[._-]?[A-Za-z0-9%+]+ ?@))?[A-Za-z0-9._%+-]+ ?@ ?[A-Za-z0-9-]+(?: ?[.:;]{1,2} ?[A-Za-z0-9-]+| ?,[A-Za-z0-9-]+)*(?: (?:[a-z]{2}|com|org|net|edu|gov|info|biz)(?![\w@]))?/g,
     v => /[A-Za-z0-9] ?@ ?[A-Za-z0-9-]{2,}/.test(v)),
   whole('IBAN (OCR)', 'IBAN', /\b[A-Z]{2}[0-9OIl]{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g),
-  // Any long number: phone, account, ID, card, read with O, I or l for a digit.
-  whole('long number (OCR)', 'NUMBER', /(?<![\w])\+?(?:[0-9OIl][ .\-/]?){5,}[0-9OIl](?![\w])/g, v => digitsOf(v).length >= 5),
+  // Any long number: phone, account, ID, card, read with O, I or l for a digit. Not a date, with
+  // or without the hour after it ("02.10.2026 08" of "08:12"): a receipt's date is what Claude needs.
+  whole('long number (OCR)', 'NUMBER', /(?<![\w])\+?(?:[0-9OIl][ .\-/]?){5,}[0-9OIl](?![\w])/g,
+    v => digitsOf(v).length >= 5 && !OCR_DATE.test(v.trim())),
+  // A document number: capitals and at least five digits in one word ("RX4817265"). A card's label is often far from its value once OCR reads a card's columns.
+  whole('document number (OCR)', 'ID_NUMBER', /(?<![\w<])(?=[A-Z0-9]*[A-Z])(?=[A-Z]*\d[A-Z]*\d[A-Z]*\d[A-Z]*\d[A-Z]*\d)[A-Z0-9]{6,12}(?![\w<])/g),
 ]
 
+/** A date as OCR reads it, maybe with the hour after it. */
+const OCR_DATE = /^(?:\d{1,2}[./-]\d{1,2}[./-](?:\d{4}|\d{2})|\d{4}[./-]\d{1,2}[./-]\d{1,2})(?: \d{1,2})?$/
+
 /**
- * The rules for text read out of an image, in order: OCR's email and IBAN
+ * A passport's or ID card's machine-readable lines ("MORENO<TORRES<<LUCIA<<<"):
+ * name, number, birth date and nationality, each whole. OCR reads some "<" as
+ * "«", "x" or "K", but a line keeps a run of two.
+ */
+const MRZ: PatternRule = whole('machine-readable zone', 'ID_NUMBER', /(?<![\w<«])[A-Za-z0-9<«]*[<«]{2}[A-Za-z0-9<«]*(?![\w<«])/g, v => v.length >= 8 && v.replace(/[<«]/g, '').length >= 2)
+
+/** Words that say a text holds someone's date of birth: an ID card, a passport, a form. */
+const BIRTH_LABEL = /\b(?:date of birth|birth ?date|d\.?o\.?b\b|born|f(?:ø|o)dselsdato|f(?:ø|o)dt|född|geboren|geburtsdatum|n(?:é|e)e? le|date de naissance|fecha de nacimiento|data di nascita|syntymäaika|geboortedatum)/i
+
+/** Every date, in a text where one of them is a date of birth (OCR loses which: a card's columns get mixed up). */
+const ANY_DATE: PatternRule = whole('date, in a text with a birth date', 'BIRTHDATE', new RegExp(`(?<![\\w.])${DATE}(?![\\w])`, 'gi'))
+
+/**
+ * The rules for text read out of an image, in order: the machine-readable lines of an ID, OCR's email and IBAN
  * shapes before the text patterns (a misread IBAN fails the checksum, and the
  * phone pattern would then take its digits after "00"), OCR's long numbers after.
  */
-export const IMAGE_PATTERNS: readonly PatternRule[] = [OCR_PATTERNS[0]!, OCR_PATTERNS[1]!, ...PATTERNS, ...OCR_PATTERNS.slice(2)]
+export const IMAGE_PATTERNS: readonly PatternRule[] = [MRZ, OCR_PATTERNS[0]!, OCR_PATTERNS[1]!, ...PATTERNS, ...OCR_PATTERNS.slice(2)]
+
+/**
+ * IMAGE_PATTERNS for one image's text. Dates are left alone (a receipt's date),
+ * unless the text says one is a date of birth: then every date in it is masked.
+ */
+export function imagePatterns(text: string): readonly PatternRule[] {
+  return BIRTH_LABEL.test(text) ? [...IMAGE_PATTERNS, ANY_DATE] : IMAGE_PATTERNS
+}
 

@@ -43,6 +43,8 @@ type World = {
   files?: Record<string, string>
   /** Starting the server does nothing (it crashes). */
   serverNeverStarts?: boolean
+  /** Each media call except OCR waits this long first (the server is busy with other images). */
+  mediaWaitMs?: number
   /** What the server's image and PDF support answers. */
   media?: { ocr?: { lines: unknown[] }; pdf?: Record<string, unknown> }
   /** The server has no image and PDF support (an install made before it). */
@@ -159,6 +161,7 @@ function world(on: On, w: World = {}) {
       const kind = media[1] ?? ''
       const body = JSON.parse(e.init?.body ?? '{}') as Record<string, unknown>
       seen.mediaCalls.push({ kind, body })
+      if (w.mediaWaitMs && kind !== 'ocr') await clock.sleep(w.mediaWaitMs)
       if (kind === 'ocr') return answer(w.media?.ocr ?? { width: 300, height: 40, lines: [] })
       if (kind === 'pdf') return answer(w.media?.pdf ?? { pages: [], page_count: 0, scanned: true, images: [] })
       if (kind === 'topdf') return answer({ out: body.out, bytes: 100 })
@@ -749,6 +752,15 @@ describe('images and PDFs', () => {
     expect(inner.map(b => b.type)).toEqual(['image', 'text'])
     expect(inner[1]?.text).toContain('Customer: <<PERSON_1.')
     expect(JSON.stringify(inner)).not.toContain('Lars')
+  })
+
+  test('a covered copy is still used when the server is slow to draw it, as with several images read at once', async ($, on) => {
+    const { seen, clock } = world(on, { media: { ocr: OCR }, mediaWaitMs: 30_000 })
+    await start($)
+    const call = $.tool.call({ tool: 'Read', file_path: '/proj/card.png', tool_use_id: 't9' } as never)
+    await clock.advance(31_000)
+    await call
+    expect(seen.read).toMatch(/^\/proj\/\.claude\/pii-mask\/read-.*\.png$/)
   })
 
   test('an email as OCR read it stays one placeholder when Claude writes it back', async ($, on) => {

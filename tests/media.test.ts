@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { findRules, mask, valueSpans, Vault } from '../hooks/masker'
 import { boxLabel, maskLines, pdfText, spanBoxes } from '../hooks/media'
-import { IMAGE_PATTERNS, PATTERNS } from '../hooks/patterns'
+import { IMAGE_PATTERNS, imagePatterns, PATTERNS } from '../hooks/patterns'
 
 const ocrRules = () => IMAGE_PATTERNS
 
@@ -40,6 +40,36 @@ describe('text read from an image', () => {
   test('ordinary words and short numbers stay', () => {
     const v = new Vault('k3f9')
     expect(mask('Order shipped in 2024 to the warehouse', ocrRules(), v)).toBe('Order shipped in 2024 to the warehouse')
+  })
+
+  test('a receipt keeps its date and time', () => {
+    const v = new Vault('k3f9')
+    const text = 'NORDIC TRAIN CAFE\n02.10.2026  08:12\nTOTAL DKK 77.00\nPaid 2026-10-03'
+    expect(mask(text, imagePatterns(text), v)).toBe(text)
+  })
+
+  test('an ID card: its number, every date and its machine-readable lines are masked, even with the labels mixed up by OCR', () => {
+    const v = new Vault('k3f9')
+    const text = [
+      'OPHOLDSKORT RESIDENCE CARD',
+      'BRASILIEN Kortnr Nationalitet / 14.07.1991 Fornavne Card no',
+      'Fødselsdato Date of birth',
+      'RX4817265',
+      'Gyldig til Valid until',
+      '30.09.2031',
+      'IDDNKRX48172655<<<<<<xx<<<<<<< Arbejde Work',
+      '9107146F3109305BRA<<<<<<<<<<<6',
+      'MORENO<TORRES<<LUCIA<ISABEL<<<',
+    ].join('\n')
+    const masked = mask(text, imagePatterns(text), v)
+    for (const value of ['14.07.1991', 'RX4817265', '30.09.2031', 'IDDNKRX48172655', '9107146F3109305BRA', 'TORRES', 'LUCIA']) expect(masked).not.toContain(value)
+    expect(masked).toContain('Fødselsdato Date of birth')
+    expect(masked).toContain('BRASILIEN')
+  })
+
+  test('code with a shift stays', () => {
+    const v = new Vault('k3f9')
+    expect(mask('x = a << 2; y = b<<4', ocrRules(), v)).toBe('x = a << 2; y = b<<4')
   })
 
   test('valueSpans finds each masked value in the original line', () => {
