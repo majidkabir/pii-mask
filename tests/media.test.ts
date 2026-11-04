@@ -15,6 +15,7 @@ describe('text read from an image', () => {
     ['Account DK89 3704 0044 0532 0130 00 refund', 'IBAN', 'DK89 3704 0044 0532 0130 00'], // checksum fails (a misread); not a phone after "00"
     ['IBAN: DK5O00400440116243', 'IBAN', 'DK5O00400440116243'],
     ['Phone 28 47 l9 63 now', 'NUMBER', '28 47 l9 63'],
+    ['Tel 28 47 19 63', 'PHONE', '28 47 19 63'], // not a date: no month 47
     ['CPR 14O387-1234', 'ID_NUMBER', '14O387-1234'], // the text rule for a named ID number catches it first
   ]
   for (const [text, label, value] of cases) {
@@ -44,7 +45,7 @@ describe('text read from an image', () => {
 
   test('a receipt keeps its date and time', () => {
     const v = new Vault('k3f9')
-    const text = 'NORDIC TRAIN CAFE\n02.10.2026  08:12\nTOTAL DKK 77.00\nPaid 2026-10-03'
+    const text = 'NORDIC TRAIN CAFE\n02 10 2026 08 : 12\nHOTEL\n03.10.2026 18:40\nTOTAL DKK 77.00\nPaid 2026-10-03' // OCR loses the dots
     expect(mask(text, imagePatterns(text), v)).toBe(text)
   })
 

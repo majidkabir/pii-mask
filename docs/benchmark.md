@@ -98,9 +98,9 @@ Found afterwards in a recheck in a fresh Claude Code session, with a CRM screens
 - An account number that fails the IBAN checksum, as a misread one does, was half taken by the phone pattern ("0044 0532…" after "00"); OCR's IBAN shape now runs first.
 - "jonas.brix@nordfragt.dk, phone" was taken with the comma and the next word.
 
-Found in a real run on a Downloads folder (receipts, holiday photos, a screenshot and a made-up residence card, 0.7.14; personal data hidden on the benchmark pages unchanged, 0.79 clean and 0.80 scanned, box precision 0.94):
+Found in a real run on a Downloads folder (receipts, holiday photos, a screenshot and a made-up residence card, 0.7.14–0.7.15; personal data hidden on the benchmark pages unchanged, 0.79 clean and 0.80 scanned, box precision 0.94):
 - A card number of letters and digits ("RX4817265") was left: the long-number shape wants no letter before it. A word of capitals with at least five digits is now masked in an image.
 - A card's machine-readable lines ("MORENO<TORRES<<LUCIA<ISABEL<<<") were masked only where the model found a name. Each is now masked whole.
-- A receipt's date ("02.10.2026 08:12") was masked as a long number, so Claude couldn't file the expense. Dates in an image now stay, unless its text names a date of birth; then every date in it is masked, since OCR mixes up a card's columns and the label can end up far from its date.
+- A receipt's date ("02.10.2026 08:12") was masked as a long number, so Claude couldn't file the expense. Dates in an image now stay, also as OCR reads them without their dots ("02 10 2026"), unless its text names a date of birth; then every date in it is masked, since OCR mixes up a card's columns and the label can end up far from its date.
 
 Faces: pii-mask pixelates faces found by OpenCV's YuNet, which its authors report at 0.884 / 0.866 / 0.750 AP (easy / medium / hard) on the WIDER FACE validation set ([OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)); WIDER FACE couldn't be downloaded here to measure it again. A face filling a 1,400-pixel photo is still found.

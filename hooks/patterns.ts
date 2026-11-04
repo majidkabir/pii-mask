@@ -209,13 +209,23 @@ export const OCR_PATTERNS: readonly PatternRule[] = [
   // Any long number: phone, account, ID, card, read with O, I or l for a digit. Not a date, with
   // or without the hour after it ("02.10.2026 08" of "08:12"): a receipt's date is what Claude needs.
   whole('long number (OCR)', 'NUMBER', /(?<![\w])\+?(?:[0-9OIl][ .\-/]?){5,}[0-9OIl](?![\w])/g,
-    v => digitsOf(v).length >= 5 && !OCR_DATE.test(v.trim())),
+    v => digitsOf(v).length >= 5 && !ocrDate(v.trim())),
   // A document number: capitals and at least five digits in one word ("RX4817265"). A card's label is often far from its value once OCR reads a card's columns.
   whole('document number (OCR)', 'ID_NUMBER', /(?<![\w<])(?=[A-Z0-9]*[A-Z])(?=[A-Z]*\d[A-Z]*\d[A-Z]*\d[A-Z]*\d[A-Z]*\d)[A-Z0-9]{6,12}(?![\w<])/g),
 ]
 
-/** A date as OCR reads it, maybe with the hour after it. */
-const OCR_DATE = /^(?:\d{1,2}[./-]\d{1,2}[./-](?:\d{4}|\d{2})|\d{4}[./-]\d{1,2}[./-]\d{1,2})(?: \d{1,2})?$/
+/**
+ * A date as OCR reads it, maybe with the hour after it: "02.10.2026", "2026-10-03", or "02 10 2026 08"
+ * (OCR often loses the dots). The day, month and hour have to be ones, so "28 47 19 63" stays a phone number.
+ */
+function ocrDate(v: string): boolean {
+  const m = /^(\d{1,2})([ ./-])(\d{1,2})\2(\d{4}|\d{2})(?: (\d{1,2}))?$/.exec(v) ?? /^(\d{4})([ ./-])(\d{1,2})\2(\d{1,2})(?: (\d{1,2}))?$/.exec(v)
+  if (!m) return false
+  const [, a, sep, b, c, hour] = m
+  const [day, month, year] = a!.length === 4 ? [+c!, +b!, a!] : [+a!, +b!, c!]
+  if (sep === ' ' && year.length !== 4) return false
+  return day >= 1 && day <= 31 && month >= 1 && month <= 12 && /^(?:19|20)\d\d$|^\d\d$/.test(year) && (hour === undefined || +hour <= 23)
+}
 
 /**
  * A passport's or ID card's machine-readable lines ("MORENO<TORRES<<LUCIA<<<"):
