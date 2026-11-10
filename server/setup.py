@@ -26,6 +26,10 @@ import threading
 import time
 
 MODEL = "urchade/gliner_multi_pii-v1"
+# The model's files are fetched at this commit of its Hugging Face repository,
+# not whatever the repository holds on the day: its weights are a PyTorch file,
+# which can run code when loaded. None: the current one, whose commit is recorded.
+MODEL_REVISION = None
 GLINER = "gliner>=0.2.16,<0.3"
 # The PII model's tokenizer (mdeberta) is converted on first load, which needs
 # protobuf ("DebertaV2Converter requires the protobuf library") and sentencepiece.
@@ -50,7 +54,10 @@ INTEL_MAC_TORCH = ["torch==2.2.2", "torchvision==0.17.2", "numpy<2"]
 MEDIA = ["easyocr", "pypdf", "pypdfium2"]
 OCR_LANGS = ["en", "da", "no", "sv", "de", "nl", "fr", "es", "it", "pt", "pl"]
 YUNET = "face_detection_yunet_2023mar.onnx"
-YUNET_URL = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/" + YUNET
+# The face model at a fixed commit of opencv_zoo, checked against its SHA-256.
+YUNET_COMMIT = "48b10fa505aeb51fbd127fc60a5c660040e823b7"
+YUNET_URL = f"https://media.githubusercontent.com/media/opencv/opencv_zoo/{YUNET_COMMIT}/models/face_detection_yunet/{YUNET}"
+YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 INTEL_MAC_EXTRA = ["transformers>=4.51.3,<4.58", "numpy<2"]
 
 
@@ -271,13 +278,17 @@ def main():
     def fetch_media_models():
         models = os.path.join(cache, "models")
         code = (
-            "import os, urllib.request, easyocr\n"
+            "import hashlib, os, sys, urllib.request, easyocr\n"
             f"d = {models!r}\n"
             "os.makedirs(d, exist_ok=True)\n"
             f"easyocr.Reader({OCR_LANGS!r}, gpu=False, model_storage_directory=os.path.join(d, 'easyocr'), download_enabled=True, verbose=False)\n"
             f"p = os.path.join(d, {YUNET!r})\n"
-            "if not os.path.exists(p) or os.path.getsize(p) < 100000:\n"
+            "sha = lambda f: hashlib.sha256(open(f, 'rb').read()).hexdigest()\n"
+            f"if not os.path.exists(p) or sha(p) != {YUNET_SHA256!r}:\n"
             f"    urllib.request.urlretrieve({YUNET_URL!r}, p + '.part')\n"
+            f"    if sha(p + '.part') != {YUNET_SHA256!r}:\n"
+            "        os.remove(p + '.part')\n"
+            "        sys.exit('ERROR the face model downloaded is not the expected file (SHA-256 differs)')\n"
             "    os.replace(p + '.part', p)\n"
         )
         run([py, "-c", code], "downloading the OCR and face models")
@@ -345,7 +356,21 @@ def main():
             log.write(f"image and PDF support left out: {err}\n")
 
         say("STEP 4/4 downloading the PII model")
-        run([py, "-c", f"from gliner import GLiNER; GLiNER.from_pretrained({MODEL!r})"], "downloading the model")
+        revision_file = os.path.join(cache, "model-revision")
+        run([py, "-c", (
+            "import os\n"
+            "from huggingface_hub import snapshot_download\n"
+            "from gliner import GLiNER\n"
+            f"path = snapshot_download({MODEL!r}, revision={MODEL_REVISION!r})\n"
+            "GLiNER.from_pretrained(path)  # loads, and fetches what it needs besides (the tokenizer)\n"
+            f"open({revision_file!r}, 'w').write(os.path.basename(path))\n"
+            "print('model revision', os.path.basename(path))\n"
+        )], "downloading the model")
+        try:
+            with open(revision_file, encoding="utf-8") as f:
+                revision = f.read().strip()
+        except OSError:
+            revision = ""
         if not media_error:
             try:
                 fetch_media_models()
@@ -363,7 +388,8 @@ def main():
     shutil.rmtree(tmp, ignore_errors=True)
     say(f"SIZE {max(0, folder_size(cache) - baseline)}")
 
-    write_marker(marker, {"model": MODEL, "python": platform.python_version(), "media": not media_error,
+    say(f"MODEL {MODEL} at {revision or 'unknown revision'}")
+    write_marker(marker, {"model": MODEL, "revision": revision, "python": platform.python_version(), "media": not media_error,
                           **({"media_error": media_error} if media_error else {})})
     say("DONE")
     return 0

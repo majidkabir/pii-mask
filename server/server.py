@@ -122,6 +122,22 @@ def pieces(text):
         yield start, buf
 
 
+def installed_snapshot(cache):
+    """The model's files at the commit setup.py fetched (installed.json's
+    revision), so the server loads exactly those; None for an install from
+    before 0.7.16, which loads what the cache holds."""
+    try:
+        with open(os.path.join(cache, "installed.json"), encoding="utf-8") as f:
+            revision = json.load(f).get("revision") or ""
+    except (OSError, ValueError):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    path = os.path.join(os.environ.get("HF_HOME") or os.path.join(cache, "hf"), "hub",
+                        "models--" + MODEL.replace("/", "--"), "snapshots", revision)
+    return path if os.path.isdir(path) else None
+
+
 class Gliner:
     def __init__(self, cache):
         os.environ.setdefault("HF_HOME", os.path.join(cache, "hf"))
@@ -129,7 +145,7 @@ class Gliner:
         from gliner import GLiNER
 
         self.name = MODEL
-        self.model = GLiNER.from_pretrained(MODEL)
+        self.model = GLiNER.from_pretrained(installed_snapshot(cache) or MODEL)
 
     def predict(self, chunks, labels, threshold):
         run = getattr(self.model, "inference", None) or getattr(self.model, "batch_predict_entities", None)

@@ -19,7 +19,6 @@ import threading
 # Latin-script languages EasyOCR reads with one model (latin_g2).
 OCR_LANGS = ["en", "da", "no", "sv", "de", "nl", "fr", "es", "it", "pt", "pl"]
 YUNET = "face_detection_yunet_2023mar.onnx"
-YUNET_URL = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/" + YUNET
 MAX_SIDE = 1568  # Claude scales larger images down anyway; smaller is faster to read
 MAX_PDF_CHARS = 200_000
 RENDER_SIDE = 1400  # a scanned page is rendered to this many pixels on its long side

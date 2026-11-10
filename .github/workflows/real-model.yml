@@ -37,8 +37,20 @@ jobs:
         run: |
           py="${{ runner.temp }}/pii/venv/bin/python"
           [ -f "$py" ] || py="${{ runner.temp }}/pii/venv/Scripts/python.exe"
-          "$py" tools/benchmark/perf.py --json perf.json
+          "$py" tools/benchmark/perf.py --cache "${{ runner.temp }}/pii" --json perf.json
       - uses: actions/upload-artifact@v4
         with:
           name: perf-${{ matrix.os }}
           path: perf.json
+      # On benchmark-* branches: the model files Ubuntu downloaded, kept a day, to
+      # rerun the benchmarks and real sessions where Hugging Face can't be reached.
+      - name: Keep the model files
+        if: startsWith(github.ref_name, 'benchmark-') && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-files
+          retention-days: 1
+          path: |
+            ${{ runner.temp }}/pii/hf
+            ${{ runner.temp }}/pii/models
+            ${{ runner.temp }}/pii/installed.json

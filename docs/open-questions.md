@@ -8,7 +8,7 @@ Known gaps and what has not been verified yet.
 | 2 | [Misses go out as written](#2-misses-go-out-as-written) | 🟡 Patterns added in 0.3; names and addresses still rely on the model |
 | 3 | [Speed on big tool results](#3-speed-on-big-tool-results) | 🟡 Measured on 4 machines ([performance](performance.md)); long files and scanned pages are slow the first time |
 | 4 | [Noise in code](#4-noise-in-code) | ❓ Not measured |
-| 5 | [First run blocks the session](#5-first-run-blocks-the-session) | ℹ️ By design; off if the install fails (0.6.0) |
+| 5 | [First run blocks the session](#5-first-run-blocks-the-session) | ℹ️ By design; held if the install fails (0.7.16), `/pii-mask off` to go on without it |
 | 6 | [Machines where an organization manages Claude Code](#6-machines-where-an-organization-manages-claude-code) | ⚠️ Partly covered |
 | 7 | [Gaps shared with customer-mask](#7-gaps-shared-with-customer-mask) | ⚠️ Known |
 | 8 | [Windows](#8-windows) | 🟡 Supported since 0.5.0; checked in CI, not yet on a person's machine |
@@ -60,7 +60,7 @@ NER models tag identifiers in source code as names. The shape checks drop the ob
 
 Installing takes minutes. A hook can't wait that long, so until the model answers, requests are answered locally and messages are removed. That is the only way to keep "nothing unchecked is sent" without asking for setup.
 
-Since 0.6.0, if the install fails, pii-mask turns itself off instead of holding every request: Claude Code then works as if it weren't installed, and the panel, a toast and the status line say so. It is only on once its model is installed. Once installed, a model that stops working still holds requests, since by then you rely on it.
+From 0.6.0 to 0.7.15, if the install failed, pii-mask turned itself off: every later session sent messages unmasked, with only the status line saying so. For a privacy tool that was the wrong default, so since 0.7.16 a failed install holds requests like a model that stops, with the reason and the fix. `/pii-mask off` (or the panel's button) lets them through unmasked for the rest of that session, when you choose to work without it.
 
 ### 6. Machines where an organization manages Claude Code
 
@@ -70,7 +70,7 @@ There, Claude Code's built-in guard runs before plugins a person installs, and s
 
 - In headless runs (`claude -p`, the SDK), Claude Code titles the session from the raw first prompt before any hook runs, and the printed answer keeps its placeholders: it is taken from the stored reply, which no hook can change for printing. Files written and commands run get the real values as usual.
 - `claude --safe-mode` and `--bare` start without any mods.
-- Bash gets real values; a command that sends data somewhere itself (`curl` to an outside API) sends them too.
+- Bash gets real values. Since 0.7.16 a command that sends data over the network itself (`curl`, `wget`, `ssh`, `gh`, cloud CLIs, `git push`, a publish, code calling `requests.post` or `fetch("https://…")`) keeps its placeholders, as web and MCP tools do. A script that sends data without saying so in its command line (`python sync.py`), or a file pushed after Claude wrote real values into it, still sends them.
 - Masking hides values, not context: a job title, a town or a story can still identify a person.
 - Images pasted into a prompt can't be covered (Claude Code doesn't let plugins replace them), so they are dropped and their masked text sent; images read from a file are covered (see [how it works](how-it-works.md#8-images-and-pdfs)).
 - OCR misreads text. A name it misreads is masked in the text Claude gets but may not be covered in the image if the box can't be placed; long numbers and anything with an `@` are covered whatever they are. Handwriting is mostly not read.

@@ -3,8 +3,12 @@
 // nerFinds' shape checks, then [vault values, built-in patterns, model finds].
 // One fresh vault per document. Prints the masked character spans.
 //   bun run.ts in.jsonl out.jsonl      (in: {"id","text"} per line)
+import { readFileSync } from 'node:fs'
 import { findRules, mask, nerFinds, PII_LABELS, THRESHOLD, Vault } from '../../hooks/masker'
 import { PATTERNS } from '../../hooks/patterns'
+
+// The server answers only with its key: <cache>/token (PII_MASK_CACHE, else ~/.cache/pii-mask).
+const KEY = readFileSync(`${process.env.PII_MASK_CACHE ?? `${process.env.XDG_CACHE_HOME ?? `${process.env.HOME}/.cache`}/pii-mask`}/token`, 'utf8').trim()
 
 const [inFile, outFile] = process.argv.slice(2)
 const LABELS = Object.keys(PII_LABELS)
@@ -12,7 +16,7 @@ const PH = /<<([A-Z][A-Z0-9_]*_\d+(?:-\d+)?)\.([a-z0-9]{4})>>/g
 
 async function detect(texts: string[]) {
   const res = await fetch('http://127.0.0.1:8766/detect', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-pii-mask-key': KEY },
     body: JSON.stringify({ texts, labels: LABELS, threshold: THRESHOLD }),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)

@@ -30,8 +30,12 @@ WORDS = ("the order was shipped from the warehouse after the payment cleared and
          "about delivery times invoice reference attached please confirm the address below thanks for your patience").split()
 
 
+KEY = {"value": ""}  # the server's key, from <cache>/token
+
+
 def post(port, path, body, timeout=600):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", json.dumps(body).encode(), {"content-type": "application/json"})
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", json.dumps(body).encode(),
+                                 {"content-type": "application/json", "x-pii-mask-key": KEY["value"]})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -167,10 +171,14 @@ def table(res):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=8766)
+    p.add_argument("--cache", default=os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "pii-mask"),
+                   help="the server's cache folder, where its key (token) is")
     p.add_argument("--json")
     p.add_argument("--pages", help="the benchmark's rendered pages, for a real scanned page")
     p.add_argument("--no-media", action="store_true")
     args = p.parse_args()
+    with open(os.path.join(args.cache, "token"), encoding="utf-8") as f:
+        KEY["value"] = f.read().strip()
     rng = random.Random(11)
     health = get(args.port, "/health")
     res = {"server": {k: health.get(k) for k in ("model", "version")}, "text": text_section(args.port, rng)}

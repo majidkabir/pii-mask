@@ -443,6 +443,20 @@ describe('the local model\'s life cycle', () => {
     expect(text).toContain('EMAIL_1')
   })
 
+  test('during the first install, a command that becomes a prompt is checked like one (removed until the model runs)', async ($, on) => {
+    const { clock } = world(on, { installed: false, up: false, setupHangs: true })
+    for (const text of ['<command-name>/brief-client</command-name>\n<command-args>Lars Holm</command-args>', '/brief-client Lars Holm', '<command-name>/review</command-name> Lars Holm']) {
+      const pending = $.session.append({
+        message: { type: 'user', role: 'user', content: [{ type: 'text', text }] },
+        door: 'command',
+        origin: { kind: 'user' },
+        uuid: `c-${text.length}`,
+      } as never)
+      await clock.advance(7000)
+      expect(JSON.stringify((await pending).message?.content)).not.toContain('Lars')
+    }
+  })
+
   test('installed but not running: the mod starts the server and masks as soon as it answers', async ($, on) => {
     const { seen, clock } = world(on, { up: false })
     const pending = appendPrompt($, 'Write to Lars Holm')

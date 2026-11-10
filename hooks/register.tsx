@@ -203,6 +203,28 @@ function publishStatus($: EngineInterface): void {
  */
 const ownLines = new Set<string>(['/pii-mask', 'pii-mask', 'status', 'retry', '/pii-mask status', '/pii-mask retry'])
 
+/**
+ * Claude Code's commands that run on this machine and answer with their own
+ * text. A command that expands into a prompt (yours, a plugin's, /review,
+ * /init) is not one: its text is checked like any prompt.
+ */
+const LOCAL_COMMANDS = new Set([
+  'plugin', 'plugins', 'help', 'model', 'clear', 'compact', 'config', 'settings', 'status', 'login', 'logout', 'mcp',
+  'doctor', 'cost', 'usage', 'memory', 'permissions', 'hooks', 'agents', 'resume', 'exit', 'quit', 'bug', 'feedback',
+  'theme', 'vim', 'terminal-setup', 'release-notes', 'upgrade', 'ide', 'add-dir', 'export', 'context', 'statusline',
+  'rewind', 'output-style', 'privacy-settings', 'fast', 'pii-mask',
+])
+
+/** A command row of one of LOCAL_COMMANDS, or such a command's output. */
+function isLocalCommandRow(texts: readonly string[]): boolean {
+  const all = texts.join('\n')
+  const named = [...all.matchAll(/<command-name>\/?([\w:.-]+)<\/command-name>/g)].map(m => m[1] ?? '')
+  if (named.length) return named.every(n => LOCAL_COMMANDS.has(n))
+  if (/^\s*<local-command-(?:stdout|stderr|caveat)>/.test(all)) return true
+  const typed = /^\s*\/([\w:.-]+)/.exec(all)
+  return !!typed && LOCAL_COMMANDS.has(typed[1] ?? '')
+}
+
 /** Records text pii-mask wrote, line by line, and returns it. */
 function own(text: string): string {
   for (const l of text.split('\n')) if (l.trim()) ownLines.add(l.trim())
@@ -1062,6 +1084,13 @@ const readCopies = new Map<string, { original: string; text: string }>()
 /** Redacted copy → the path Claude asked for, so the tool row shows the file you know. */
 const readCopiesShown = new Map<string, string>()
 let copySeq = 0
+/** How many redacted copies the tool rows remember (the server keeps the last 20 files). */
+const SHOWN_KEPT = 200
+
+function rememberShown(copy: string, original: string): void {
+  readCopiesShown.set(copy, original)
+  while (readCopiesShown.size > SHOWN_KEPT) readCopiesShown.delete(readCopiesShown.keys().next().value as string)
+}
 
 /**
  * When Claude reads an image file (or a scanned PDF), points the Read at a
@@ -1279,11 +1308,11 @@ export const register: Register = on => {
     // would only add false finds ("We") and delay. Patterns and every value
     // found so far still apply.
     const reply = (e.message as { role?: string }).role === 'assistant'
-    // Slash commands and their output (`/plugin install ...`, "✓ Installed")
-    // and notices are Claude Code's own rows. While the model isn't ready they
-    // get the patterns and known values instead of being removed, so the
-    // screen doesn't lose them right after installing.
-    const own = (e.door === 'command' || e.door === 'notice') && engine.state !== 'ready'
+    // Claude Code's own commands and their output (`/plugin install ...`, "✓ Installed")
+    // and notices: while the model isn't ready they get the patterns and known
+    // values instead of being removed, so the screen doesn't lose them right after
+    // installing. Not a command that becomes a prompt (your own, /review): checked as one.
+    const own = ((e.door === 'command' && isLocalCommandRow(texts)) || e.door === 'notice') && engine.state !== 'ready'
     const known = () => [...findRules([], vault), ...PATTERNS]
     // Web results are public pages fetched for a query that kept its placeholders;
     // they are often long, so if the model can't check them in time, the patterns
@@ -1406,8 +1435,10 @@ export const register: Register = on => {
         copy = undefined // left as it is: session.append drops the unchecked image
       }
       if (copy) {
-        readCopiesShown.set(copy, path)
-        return next({ ...call, file_path: copy } as typeof e)
+        rememberShown(copy, path)
+        // A scanned PDF's copy holds only its first pages, numbered from 1: a page range asked of the original doesn't apply.
+        const { pages: _pages, ...rest } = call as typeof call & { pages?: unknown }
+        return next({ ...rest, file_path: copy } as typeof e)
       }
     }
     return next(call)
@@ -1461,8 +1492,8 @@ export const register: Register = on => {
   // before Claude Code reads it (its text goes through prompt.attachment).
   on('prompt.mention', async ($, e, next) => {
     if (!(IMAGE_FILE.test(e.path) || PDF_FILE.test(e.path))) return next(e)
-    // All within the hook's 10 s, the wait for the model included: a hook that
-    // outlasts it is skipped and the file read as it is.
+    // All within MENTION_BUDGET_MS, the wait for the model included; past it the
+    // .catch refuses the mention, so nothing of the file is attached.
     const swap = await withTimeout($, (async () => {
       await ready($)
       return bypass() ? undefined : mentionCopy($, e.path)
@@ -1472,7 +1503,7 @@ export const register: Register = on => {
       mediaDropped += 1
       return { deny: swap.deny }
     }
-    readCopiesShown.set(swap.path, e.path)
+    rememberShown(swap.path, e.path)
     const result = await next({ ...e, path: swap.path })
     if (result.deny !== undefined || !swap.context) return result
     return { ...result, context: [...(result.context ?? []), swap.context] }
