@@ -5,22 +5,31 @@ The mod starts it when no session has (`--daemon`), and every session on the
 machine shares it. It listens on 127.0.0.1 only, logs nothing it is sent, and
 stops by itself after 30 minutes without requests.
 
+Only the mod may use it: every request but /health carries the key in
+<cache>/token (readable by this user alone), and a request a web page could
+make (an Origin header, another site's Host) is refused. /health?nonce=N
+answers sha256(key:N) as `proof`, so the mod knows the server on the port is
+its own before it sends anything.
+
     <cache>/venv/bin/python server/server.py --cache ~/.cache/pii-mask [--daemon]
     (Windows: <cache>\\venv\\Scripts\\python.exe, cache %LOCALAPPDATA%\\pii-mask)
 
 API (JSON):
-    GET  /health  -> {"app": "pii-mask", "ok": true, "model": ...}
+    GET  /health[?nonce=N] -> {"app": "pii-mask", "ok": true, "model": ..., "proof": ...}
     POST /detect  {"texts": [...], "labels": ["person", "email", ...], "threshold": 0.5}
                   -> {"results": [[{"text", "label", "start", "end", "score"}, ...], ...]}
 """
 
 import argparse
 import base64
+import hashlib
+import hmac
 import heapq
 import itertools
 import json
 import os
 import re
+import secrets
 import socketserver
 import subprocess
 import sys
@@ -113,6 +122,22 @@ def pieces(text):
         yield start, buf
 
 
+def installed_snapshot(cache):
+    """The model's files at the commit setup.py fetched (installed.json's
+    revision), so the server loads exactly those; None for an install from
+    before 0.7.16, which loads what the cache holds."""
+    try:
+        with open(os.path.join(cache, "installed.json"), encoding="utf-8") as f:
+            revision = json.load(f).get("revision") or ""
+    except (OSError, ValueError):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    path = os.path.join(os.environ.get("HF_HOME") or os.path.join(cache, "hf"), "hub",
+                        "models--" + MODEL.replace("/", "--"), "snapshots", revision)
+    return path if os.path.isdir(path) else None
+
+
 class Gliner:
     def __init__(self, cache):
         os.environ.setdefault("HF_HOME", os.path.join(cache, "hf"))
@@ -120,7 +145,7 @@ class Gliner:
         from gliner import GLiNER
 
         self.name = MODEL
-        self.model = GLiNER.from_pretrained(MODEL)
+        self.model = GLiNER.from_pretrained(installed_snapshot(cache) or MODEL)
 
     def predict(self, chunks, labels, threshold):
         run = getattr(self.model, "inference", None) or getattr(self.model, "batch_predict_entities", None)
@@ -196,13 +221,15 @@ class Detector:
         self.cache = {}
         self.cache_lock = threading.Lock()
 
-    def detect(self, texts, labels, threshold):
+    def detect(self, texts, labels, threshold, cancelled=lambda: False):
         parts = [(i, off, chunk) for i, t in enumerate(texts) for off, chunk in pieces(t) if chunk.strip()]
         key = (tuple(labels), threshold)
         with self.cache_lock:
             found = {c: self.cache.get((key, c)) for _, _, c in parts}
         todo = list(dict.fromkeys(c for c, ents in found.items() if ents is None))
         for n in range(0, len(todo), BATCH):
+            if cancelled():  # the mod gave up waiting: free the model for the next request
+                raise RuntimeError("cancelled")
             batch = todo[n:n + BATCH]
             ents = self.gate.run(len(todo) - n, lambda: self.backend.predict(batch, labels, threshold))
             with self.cache_lock:
@@ -241,20 +268,29 @@ class Jobs:
             now = time.time()
             for k in [k for k, j in self.jobs.items() if j["done"] and now - j["at"] > self.KEEP]:
                 del self.jobs[k]
-            self.jobs[job] = {"done": False, "at": now, "event": threading.Event()}
+            self.jobs[job] = {"done": False, "at": now, "event": threading.Event(), "cancelled": threading.Event()}
+        cancelled = self.jobs[job]["cancelled"]
 
         def run():
             try:
-                status, body = work()
+                status, body = work(cancelled.is_set)
             except Exception as err:  # never leave a job unfinished
                 status, body = 500, {"error": f"{type(err).__name__}: {err}"}
             with self.lock:
                 event = self.jobs[job]["event"]
-                self.jobs[job] = {"done": True, "at": time.time(), "status": status, "body": body, "event": event}
+                self.jobs[job] = {"done": True, "at": time.time(), "status": status, "body": body, "event": event, "cancelled": cancelled}
             event.set()
 
         threading.Thread(target=run, daemon=True).start()
         return job
+
+    def cancel(self, job):
+        """The mod gave up on the job: it stops between steps and writes no file."""
+        with self.lock:
+            j = self.jobs.pop(job, None)
+        if j:
+            j["cancelled"].set()
+        return j is not None
 
     def get(self, job, wait=0.0):
         """The job, once done or after `wait` seconds (a long poll: the caller
@@ -270,25 +306,51 @@ class Jobs:
             return j
 
 
-def make_handler(backend, state, media=None):
+MEDIA_FILE = re.compile(r"\.(png|jpe?g|gif|webp|bmp|tiff?|pdf)$", re.I)
+COPY_NAME = re.compile(r"^read-\d+-\d+\.(png|pdf)$")
+
+
+def input_path(path):
+    """A file the mod asks to read: an image or a PDF, nothing else."""
+    if not isinstance(path, str) or not os.path.isabs(path) or not MEDIA_FILE.search(path):
+        raise ValueError("path must be an absolute path to an image or a PDF")
+    return path
+
+
+def copy_path(path):
+    """Where the mod asks for a covered copy: read-<time>-<n>.png|pdf in a
+    .claude/pii-mask folder, so no other file can be written or replaced."""
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise ValueError("out must be an absolute path")
+    folder, name = os.path.split(os.path.normpath(path))
+    parts = os.path.normpath(folder).replace("\\", "/").split("/")
+    if not COPY_NAME.match(name) or parts[-2:] != [".claude", "pii-mask"] or os.path.islink(path):
+        raise ValueError("out must be .claude/pii-mask/read-<time>-<n>.png or .pdf")
+    return path
+
+
+def make_handler(backend, state, key, media=None):
+    """The request handler. `key` is the secret every request but /health must carry."""
     jobs = Jobs()
 
-    def detect(req):
+    def detect(req, cancelled=lambda: False):
         texts, labels = req["texts"], req["labels"]
         threshold = float(req.get("threshold", 0.5))
         if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
             raise ValueError("texts must be a list of strings")
-        return 200, {"results": backend.detect(texts, labels, threshold)}
+        return 200, {"results": backend.detect(texts, labels, threshold, cancelled)}
 
-    def media_work(kind, req, status):
+    def media_work(kind, req, status, cancelled=lambda: False):
         """POST /media/pdf {data, render?, maxPages?}, /media/ocr {data},
-        /media/redact {data, boxes, faces?}, /media/topdf {images, out}; data is
-        base64 both ways, or `path`, a file on this machine."""
+        /media/redact {data, boxes, faces?, out?}, /media/topdf {images, out}; data is
+        base64 both ways, or `path`, an image or PDF on this machine."""
         data = None if kind == "topdf" else (
-            open(req["path"], "rb").read() if req.get("path") else base64.b64decode(req["data"]))
-        out_path = req.get("out")
+            open(input_path(req["path"]), "rb").read() if req.get("path") else base64.b64decode(req["data"]))
+        out_path = copy_path(req["out"]) if kind == "topdf" or req.get("out") else None
         if kind == "topdf":
             pdf = media.to_pdf([base64.b64decode(i) for i in req["images"]])
+            if cancelled():
+                return 499, {"error": "cancelled"}
             write_file(out_path, pdf)
             return 200, {"out": out_path, "bytes": len(pdf)}
         if kind == "pdf":
@@ -298,6 +360,8 @@ def make_handler(backend, state, media=None):
         if kind == "ocr":
             return 200, media.ocr(data)
         out = media.redact(data, req.get("boxes") or [], blur_faces=bool(req.get("faces")) and status.get("faces"))
+        if cancelled():  # the mod gave up waiting: no copy appears after the Read went on without it
+            return 499, {"error": "cancelled"}
         if out_path:  # written where the caller asked (a copy for Claude Code's Read tool)
             write_file(out_path, out.pop("data"))
             out["out"] = out_path
@@ -317,6 +381,20 @@ def make_handler(backend, state, media=None):
         def log_message(self, *args):  # never log what was sent
             pass
 
+        def refused(self, need_key=True):
+            """Answers 403 and returns True for a request the mod didn't make: one
+            from a web page (an Origin header, or another site's name as Host:
+            DNS rebinding), or, where `need_key`, one without the key."""
+            port = self.server.server_address[1]
+            host = (self.headers.get("host") or "").lower()
+            if self.headers.get("origin") or host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+                self.answer(403, {"error": "forbidden"})
+                return True
+            if need_key and not hmac.compare_digest(self.headers.get("x-pii-mask-key") or "", key):
+                self.answer(401, {"error": "a key is needed"})
+                return True
+            return False
+
         def answer(self, status, body):
             data = json.dumps(body).encode()
             self.send_response(status)
@@ -326,9 +404,15 @@ def make_handler(backend, state, media=None):
             self.wfile.write(data)
 
         def do_GET(self):
+            path, _, query = self.path.partition("?")
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            if self.refused(need_key=path != "/health"):
+                return
             state["last"] = time.time()
-            if self.path == "/health":
+            if path == "/health":
                 body = {"app": "pii-mask", "ok": True, "model": backend.name, "version": VERSION, "peak_rss_mb": peak_rss_mb()}
+                if params.get("nonce"):
+                    body["proof"] = hashlib.sha256(f"{key}:{params['nonce']}".encode()).hexdigest()
                 if media is not None:
                     body["media"] = media.status()
                 self.answer(200, body)
@@ -346,7 +430,11 @@ def make_handler(backend, state, media=None):
                 self.answer(404, {"error": "not found"})
 
         def do_POST(self):
+            if self.refused():
+                return
             state["last"] = time.time()
+            if self.path.startswith("/job/") and self.path.endswith("/cancel"):
+                return self.answer(200, {"cancelled": jobs.cancel(self.path[len("/job/"):-len("/cancel")])})
             if self.path == "/stop":  # a newer version of the mod replaces this server
                 self.answer(200, {"stopping": True})
                 if state.get("stop"):
@@ -362,9 +450,11 @@ def make_handler(backend, state, media=None):
                 status = media.status()
                 if not status.get(need) and not (kind == "redact" and status.get("faces")):
                     return self.answer(503, {"error": f"{need} support is not installed"})
-                work = lambda req, kind=kind, status=status: media_work(kind, req, status)
+                work = lambda req, cancelled=lambda: False, kind=kind, status=status: media_work(kind, req, status, cancelled)
             else:
                 return self.answer(404, {"error": "not found"})
+            if (self.headers.get("content-type") or "").split(";")[0].strip().lower() != "application/json":
+                return self.answer(415, {"error": "content-type must be application/json"})
             length = int(self.headers.get("content-length") or 0)
             if length > MAX_BODY:
                 return self.answer(413, {"error": "request too large"})
@@ -373,16 +463,36 @@ def make_handler(backend, state, media=None):
             except ValueError as err:
                 return self.answer(400, {"error": str(err)})
 
-            def run():
-                result = guarded(lambda: work(req))
+            def run(cancelled=lambda: False):
+                result = guarded(lambda: work(req, cancelled))
                 state["last"] = time.time()
                 return result
 
+            if not isinstance(req, dict):
+                return self.answer(400, {"error": "the body must be a JSON object"})
             if req.get("async"):  # a job: the answer comes from GET /job/<id>
                 return self.answer(202, {"job": jobs.start(run)})
             self.answer(*run())
 
     return Handler
+
+
+def load_key(cache):
+    """The key only this user's mod can read: <cache>/token, made once with
+    permissions for this user alone."""
+    path = os.path.join(cache, "token")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_hex(32))
+    with open(path, encoding="utf-8") as f:
+        key = f.read().strip()
+    if len(key) < 32:
+        raise SystemExit(f"pii-mask: {path} holds no valid key; delete it and start again")
+    return key
 
 
 READ_COPIES_KEPT = 20
@@ -475,6 +585,7 @@ def main():
     except OSError:
         print(f"pii-mask: port {args.port} is in use; another server is probably running", file=sys.stderr)
         return 0
+    key = load_key(cache)
     if args.daemon and os.name == "nt":
         server.server_close()  # the detached copy binds it again
         detach_windows(args, cache)
@@ -490,7 +601,7 @@ def main():
     media = Media(cache)
     if media.status()["images"]:
         media.warm_up()  # the OCR model takes seconds to load; not on the first image's clock
-    server.RequestHandlerClass = make_handler(backend, state, media)
+    server.RequestHandlerClass = make_handler(backend, state, key, media)
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pii-mask model server: {backend.name} ready in "
           f"{time.time() - started:.1f} s on 127.0.0.1:{args.port}", flush=True)
 

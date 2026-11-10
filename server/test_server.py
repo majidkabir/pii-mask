@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 
-from server import BATCH, Detector, Fake, Gate, make_handler
+from server import BATCH, Detector, Fake, Gate, copy_path, load_key, make_handler
 
 
 class Counting:
@@ -124,24 +124,134 @@ class JobsTest(unittest.TestCase):
                 time.sleep(0.3)
                 return super().predict(texts, labels, threshold)
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Detector(Slow(None)), {"last": time.time()}))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Detector(Slow(None)), {"last": time.time()}, KEY))
         threading.Thread(target=server.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{server.server_address[1]}"
+        get = lambda path: urllib.request.urlopen(urllib.request.Request(base + path, headers={"x-pii-mask-key": KEY}))
         try:
             body = json.dumps({"texts": ["Write to Lars Holm"], "labels": ["person"], "async": True}).encode()
-            with urllib.request.urlopen(urllib.request.Request(base + "/detect", body, {"content-type": "application/json"})) as r:
+            with urllib.request.urlopen(urllib.request.Request(base + "/detect", body, {"content-type": "application/json", "x-pii-mask-key": KEY})) as r:
                 self.assertEqual(r.status, 202)
                 job = json.loads(r.read())["job"]
-            with urllib.request.urlopen(f"{base}/job/{job}?wait=0") as r:
+            with get(f"/job/{job}?wait=0") as r:
                 self.assertEqual(json.loads(r.read()), {"done": False})
             t = time.time()
-            with urllib.request.urlopen(f"{base}/job/{job}?wait=5") as r:
+            with get(f"/job/{job}?wait=5") as r:
                 answer = json.loads(r.read())
             self.assertLess(time.time() - t, 2)  # answered when done, not after the full wait
             self.assertEqual(answer["status"], 200)
             self.assertEqual(answer["body"]["results"][0][0]["text"], "Lars Holm")
             with self.assertRaises(urllib.error.HTTPError):  # answered once
-                urllib.request.urlopen(f"{base}/job/{job}")
+                get(f"/job/{job}")
         finally:
             server.shutdown()
 
+
+KEY = "k" * 64
+
+
+class AccessTest(unittest.TestCase):
+    """Only the mod may use the server: not a web page, not another program without the key."""
+
+    def setUp(self):
+        from http.server import ThreadingHTTPServer
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Detector(Fake(None)), {"last": time.time()}, KEY))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.port = self.server.server_address[1]
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def ask(self, path, body=None, headers=None):
+        """(status, answer) for a request with exactly these headers (and Host 127.0.0.1:<port>)."""
+        import http.client
+        import json
+
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        h = {"Host": f"127.0.0.1:{self.port}", **(headers or {})}
+        c.request("POST" if body is not None else "GET", path, body=body, headers=h)
+        r = c.getresponse()
+        return r.status, json.loads(r.read() or b"{}")
+
+    def test_the_mod_with_its_key_is_answered(self):
+        import json
+
+        status, out = self.ask("/detect", json.dumps({"texts": ["Lars Holm"], "labels": ["person"]}), {"content-type": "application/json", "x-pii-mask-key": KEY})
+        self.assertEqual(status, 200)
+        self.assertEqual(out["results"][0][0]["text"], "Lars Holm")
+
+    def test_without_the_key_nothing_but_health(self):
+        import json
+
+        body = json.dumps({"texts": ["Lars Holm"], "labels": ["person"]})
+        self.assertEqual(self.ask("/detect", body, {"content-type": "application/json"})[0], 401)
+        self.assertEqual(self.ask("/detect", body, {"content-type": "application/json", "x-pii-mask-key": "k" * 63 + "x"})[0], 401)
+        self.assertEqual(self.ask("/stop", "{}", {"content-type": "application/json"})[0], 401)
+        self.assertEqual(self.ask("/job/1")[0], 401)
+        self.assertEqual(self.ask("/health")[0], 200)
+
+    def test_a_web_page_is_refused_even_with_the_key(self):
+        import json
+
+        body = json.dumps({"texts": ["Lars Holm"], "labels": ["person"]})
+        ok = {"content-type": "application/json", "x-pii-mask-key": KEY}
+        self.assertEqual(self.ask("/detect", body, {**ok, "Origin": "https://evil.example"})[0], 403)
+        self.assertEqual(self.ask("/detect", body, {**ok, "Host": f"evil.example:{self.port}"})[0], 403)  # DNS rebinding
+        self.assertEqual(self.ask("/health", None, {"Host": f"evil.example:{self.port}"})[0], 403)
+        self.assertEqual(self.ask("/detect", body, {**ok, "content-type": "text/plain"})[0], 415)
+
+    def test_health_proves_the_key_without_giving_it(self):
+        import hashlib
+
+        status, out = self.ask("/health?nonce=abc123")
+        self.assertEqual(status, 200)
+        self.assertEqual(out["proof"], hashlib.sha256(f"{KEY}:abc123".encode()).hexdigest())
+        self.assertNotIn(KEY, str(out))
+
+
+class PathsTest(unittest.TestCase):
+    def test_copies_go_only_to_a_pii_mask_folder_as_read_files(self):
+        import os
+
+        ok = os.path.join(os.path.abspath(os.sep), "proj", ".claude", "pii-mask", "read-1793834106395-0.png")
+        self.assertEqual(copy_path(ok), ok)
+        for bad in [os.path.join(os.path.abspath(os.sep), "home", "u", ".bashrc"),
+                    os.path.join(os.path.abspath(os.sep), "proj", ".claude", "pii-mask", "evil.png"),
+                    os.path.join(os.path.abspath(os.sep), "proj", ".claude", "pii-mask", "..", "settings.json"),
+                    os.path.join(os.path.abspath(os.sep), "proj", "read-1-0.png"),
+                    "read-1-0.png"]:
+            with self.assertRaises(ValueError):
+                copy_path(bad)
+
+    def test_the_key_file_is_made_once_for_this_user_only(self):
+        import os
+        import stat
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            a = load_key(d)
+            self.assertEqual(load_key(d), a)
+            self.assertGreaterEqual(len(a), 64)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(os.stat(os.path.join(d, "token")).st_mode), 0o600)
+
+
+
+class PixelateTest(unittest.TestCase):
+    def test_a_face_becomes_a_few_flat_blocks_however_big_it_is(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        import random
+
+        from media import FACE_BLOCKS, pixelate
+
+        for side in (120, 500, 1400):
+            rnd = random.Random(side)
+            img = Image.new("RGB", (side, side))
+            img.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(side * side)])
+            pixelate(img, (0, 0, side, side))
+            self.assertLessEqual(len(set(img.getdata())), FACE_BLOCKS * FACE_BLOCKS)

@@ -68,6 +68,19 @@ describe('text read from an image', () => {
     expect(masked).toContain('BRASILIEN')
   })
 
+  test('a birth date OCR read without its dots is still masked', () => {
+    for (const text of [
+      'Fødselsdato / Date of birth\n14 07 1991',
+      'Date of birth 14 07 1991',
+      'Name: Liva Kragh\nBorn: 14 03 1991',
+      'Født 1 2 1985, card RX4817265',
+    ]) {
+      const v = new Vault('k3f9')
+      const masked = mask(text, imagePatterns(text), v)
+      expect(masked).not.toMatch(/\b(?:19|20)\d\d\b/)
+    }
+  })
+
   test('code with a shift stays', () => {
     const v = new Vault('k3f9')
     expect(mask('x = a << 2; y = b<<4', ocrRules(), v)).toBe('x = a << 2; y = b<<4')

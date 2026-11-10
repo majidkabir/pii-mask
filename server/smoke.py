@@ -17,15 +17,19 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = 8766
 
 
+KEY = {"value": ""}  # the server's key (<cache>/token), read once it has started
+
+
 def get(path, body=None, timeout=5):
-    req = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", data=body,
-                                 headers={"content-type": "application/json"} if body else {})
+    headers = {"x-pii-mask-key": KEY["value"], **({"content-type": "application/json"} if body else {})}
+    req = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", data=body, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -90,6 +94,16 @@ def main():
     print(f"server ready in {timings['start']:.0f} s: {health}")
     if health.get("app") != "pii-mask":
         fail(f"unexpected /health answer {health}", cache)
+    try:
+        KEY["value"] = open(os.path.join(cache, "token"), encoding="utf-8").read().strip()
+    except OSError:
+        fail("the server wrote no key (token) into its cache folder", cache)
+    try:
+        urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{PORT}/detect", data=b"{}", headers={"content-type": "application/json"}), timeout=10)
+        fail("a request without the key was answered", cache)
+    except urllib.error.HTTPError as err:
+        if err.code != 401:
+            fail(f"a request without the key got HTTP {err.code}, not 401", cache)
 
     email = "sofie.lindqvist" + "@" + "example.dk"
     text = f"Please send the contract to Sofie Lindqvist at {email}. She lives in Hellerup."

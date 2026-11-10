@@ -10,6 +10,7 @@ import {
   parseVaultFile,
   StreamUnmasker,
   toolPolicy,
+  sendsOut,
   DEFAULT_MASKED_TOOLS,
   unmask,
   unmaskDeep,
@@ -191,6 +192,23 @@ describe('policy', () => {
     const keep = toolPolicy(DEFAULT_MASKED_TOOLS)
     expect(['WebSearch', 'WebFetch', 'mcp__slack__post'].every(keep)).toBe(true)
     expect(['Bash', 'Edit', 'Write'].some(keep)).toBe(false)
+  })
+
+  test('network commands keep placeholders; local commands get real values', () => {
+    const keep = toolPolicy(DEFAULT_MASKED_TOOLS)
+    const out = (command: string) => sendsOut(keep, 'Bash', { command })
+    for (const c of [
+      'curl -d "email=X" https://api.example.com', 'cat a.json | curl -X POST -d @- https://x', 'sudo wget https://x/?q=X',
+      'gh issue create --title X', 'git push origin main', 'git -C repo push', 'ssh host "echo X"', 'cd x && npm publish',
+      '/usr/bin/curl https://x', 'python -c "import requests; requests.post(\'https://x\', data=X)"',
+      'Invoke-RestMethod -Uri https://x -Body X', 'echo X | xargs -n1 curl',
+    ]) expect([c, out(c)]).toEqual([c, true])
+    for (const c of [
+      'grep -n X customers.csv', 'echo "send mail to X" > note.txt', 'git commit -m "Add X"', 'git log --author X',
+      'python make_report.py X', 'sed -i s/old/X/ file', 'ls ~/Downloads/curl', 'grep requests log.txt',
+    ]) expect([c, out(c)]).toEqual([c, false])
+    expect(sendsOut(keep, 'Edit', { command: 'curl x' })).toBe(false)
+    expect(sendsOut(keep, 'mcp__slack__post', {})).toBe(true)
   })
 
   test('compareVersions', () => {

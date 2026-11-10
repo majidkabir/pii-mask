@@ -6,15 +6,18 @@
 // Patterns: imagePatterns (an ID's machine-readable lines, OCR's email and IBAN shapes, the text
 // patterns, OCR's long numbers; every date when the page names a birth date), then the model's finds, as readImage. One fresh vault per page and way.
 //   bun run_image.ts PAGES_DIR gold.json OUT_PREFIX clean|scan   (PAGES_DIR absolute: the server opens the files)
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { findRules, mask, nerFinds, PII_LABELS, THRESHOLD, valueSpans, Vault } from '../../hooks/masker'
 import { boxLabel, maskLines, spanBoxes, type OcrLine } from '../../hooks/media'
 import { imagePatterns } from '../../hooks/patterns'
 
+// The server answers only with its key: <cache>/token (PII_MASK_CACHE, else ~/.cache/pii-mask).
+const KEY = readFileSync(`${process.env.PII_MASK_CACHE ?? `${process.env.XDG_CACHE_HOME ?? `${process.env.HOME}/.cache`}/pii-mask`}/token`, 'utf8').trim()
+
 const [dir, goldFile, prefix, kind = 'clean'] = process.argv.slice(2)
 const post = async (path: string, body: unknown) => {
-  const res = await fetch('http://127.0.0.1:8766' + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const res = await fetch('http://127.0.0.1:8766' + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-pii-mask-key': KEY }, body: JSON.stringify(body) })
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`)
   return res.json() as Promise<any>
 }

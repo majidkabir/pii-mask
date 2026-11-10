@@ -72,6 +72,30 @@ export function toolPolicy(masked: readonly string[]): (tool: string) => boolean
   return tool => keep.some(r => r.test(tool))
 }
 
+/** Where a shell command starts: the line's start, after ; & | ( or $( or a backtick, maybe after sudo or env VAR=... */
+const AT_COMMAND = '(?:^|[;&|(`\\n]|\\$\\()\\s*(?:sudo\\s+(?:-\\S+\\s+)*|env\\s+(?:\\S+=\\S*\\s+)*|command\\s+|exec\\s+|xargs\\s+(?:-\\S+\\s+)*)*(?:\\S*[/\\\\])?'
+/**
+ * A shell command that sends data off this machine itself: an HTTP client,
+ * ssh and its kin, mail, GitHub and cloud CLIs, `git push`, a publish, or code
+ * that opens a URL. Its arguments keep their placeholders, as the web tools'
+ * do; the file it sends (a commit, an upload) is out of reach either way.
+ */
+const NETWORK_COMMAND = new RegExp(
+  `${AT_COMMAND}(?:curl|wget|https?|xh|nc|ncat|netcat|socat|telnet|ssh|scp|sftp|rsync|ftp|lftp|mail|mailx|sendmail|mutt|gh|glab|hub|aws|gcloud|gsutil|az|kubectl|heroku|vercel|netlify|Invoke-WebRequest|Invoke-RestMethod|iwr|irm|Send-MailMessage)(?:\\.exe)?(?=\\s|$)` +
+    `|${AT_COMMAND}git\\s+(?:-C\\s+\\S+\\s+)?(?:push|send-email|request-pull)\\b|${AT_COMMAND}(?:npm|pnpm|yarn|cargo|twine|docker|podman)\\s+(?:publish|push|upload)\\b` +
+    '|\\b(?:requests|httpx)\\.(?:get|post|put|patch|delete|request)\\(|\\burllib\\.request\\.urlopen\\(|\\burlopen\\(|\\bsmtplib\\.SMTP|\\bHTTPS?Connection\\(' +
+    '|\\bfetch\\(\\s*[\'"`]https?:|\\bnew\\s+WebSocket\\(',
+  'i',
+)
+
+/** Whether a tool call sends data off this machine: web and MCP tools, and network commands in Bash or PowerShell. */
+export function sendsOut(keep: (tool: string) => boolean, tool: string, input: unknown): boolean {
+  if (keep(tool)) return true
+  if (tool !== 'Bash' && tool !== 'PowerShell') return false
+  const command = (input as { command?: unknown } | null)?.command
+  return typeof command === 'string' && NETWORK_COMMAND.test(command)
+}
+
 /* ------------------------------------------------------------------ finds */
 
 /** An entity as the NER server answers it. */
@@ -522,8 +546,9 @@ export function systemNote(vault: Vault): string {
     `replaced with placeholders such as ${vault.format('PERSON_1')} or ${vault.format('EMAIL_2')}. ` +
     `A placeholder with a -2, -3 ... after its number, such as ${vault.format('PERSON_1-2')}, is another spelling of the same value. ` +
     'Use a placeholder exactly as written, including the part after the dot, wherever its real value belongs ' +
-    '(prose, code, commands, file edits): it is restored automatically before any tool runs and before the user ' +
-    'reads your reply. The user sees the real values on screen and in every file you write, so from their side ' +
+    '(prose, code, commands, file edits): it is restored automatically before a tool runs on this machine and before the user ' +
+    'reads your reply. Web and MCP tools, and commands that send data over the network (curl, ssh, gh, git push), get the placeholder itself, ' +
+    'so the real value never leaves this machine. The user sees the real values on screen and in every file you write, so from their side ' +
     'nothing is masked: write as if each placeholder were its real value, and do not mention placeholders, masking ' +
     'or missing values, or ask the user to fill them in, unless they ask about it. Never guess, reconstruct or invent the real values.'
   )

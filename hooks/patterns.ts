@@ -120,6 +120,9 @@ function after(name: string, label: string, re: RegExp, valid: (v: string) => bo
 
 const MONTH = '(?:jan|feb|mar|apr|maj|may|jun|jul|aug|sep|okt|oct|nov|dec)[a-zé]*\\.?'
 const DATE = `(?:\\d{1,4}[./-]\\d{1,2}[./-]\\d{1,4}|\\d{1,2}\\.?\\s+${MONTH}\\s+\\d{4}|${MONTH}\\s+\\d{1,2},?\\s+\\d{4})`
+/** A date written, or read by OCR, with spaces for its dots ("14 07 1991"): a four-digit year from 1900 on. */
+const SPACED_DATE = '(?:0?[1-9]|[12]\\d|3[01]) (?:0?[1-9]|1[0-2]) (?:19|20)\\d\\d'
+
 
 /** Code, not a secret: an identifier, a member chain or a call (`getPassword()`, `os.environ`). */
 const looksLikeCode = (v: string) =>
@@ -154,7 +157,7 @@ export const PATTERNS: readonly PatternRule[] = [
 
   // Values named by the words before them
   after('date of birth', 'BIRTHDATE',
-    new RegExp(`(\\b(?:date of birth|birth ?date|d\\.?o\\.?b\\.?|born(?: on)?|birthday|fødselsdato|født(?: den)?|född|geboren(?: am)?|né(?:e)? le|fecha de nacimiento)\\s*[:\\-]?\\s*)(${DATE})`, 'gi')),
+    new RegExp(`(\\b(?:date of birth|birth ?date|d\\.?o\\.?b\\.?|born(?: on)?|birthday|fødselsdato|født(?: den)?|född|geboren(?: am)?|né(?:e)? le|fecha de nacimiento)\\s*[:\\-]?\\s*)(${DATE}|${SPACED_DATE}(?!\\d))`, 'gi')),
   after('passport number', 'PASSPORT', /(\b(?:passport|pasnummer|passnummer|reisepass)\s*(?:no\.?|nr\.?|number|nummer|#)?\s*[:#]?\s*(?:is\s+|er\s+|ist\s+|är\s+)?)([A-Z0-9]{6,9})\b/gi, v => /\d/.test(v)),
   after('account number', 'ACCOUNT',
     /(\b(?:account|acct\.?|bank account|kontonummer|kontonr\.?|konto|reg\.?\s?nr\.?)\s*(?:no\.?|nr\.?|number|#)?\s*[:#]?\s*)(\d[\d -]{4,24}\d)/gi,
@@ -238,7 +241,7 @@ const MRZ: PatternRule = whole('machine-readable zone', 'ID_NUMBER', /(?<![\w<«
 const BIRTH_LABEL = /\b(?:date of birth|birth ?date|d\.?o\.?b\b|born|f(?:ø|o)dselsdato|f(?:ø|o)dt|född|geboren|geburtsdatum|n(?:é|e)e? le|date de naissance|fecha de nacimiento|data di nascita|syntymäaika|geboortedatum)/i
 
 /** Every date, in a text where one of them is a date of birth (OCR loses which: a card's columns get mixed up). */
-const ANY_DATE: PatternRule = whole('date, in a text with a birth date', 'BIRTHDATE', new RegExp(`(?<![\\w.])${DATE}(?![\\w])`, 'gi'))
+const ANY_DATE: PatternRule = whole('date, in a text with a birth date', 'BIRTHDATE', new RegExp(`(?<![\\w.])(?:${DATE}|${SPACED_DATE})(?![\\w])`, 'gi'))
 
 /**
  * The rules for text read out of an image, in order: the machine-readable lines of an ID, OCR's email and IBAN

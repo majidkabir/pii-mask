@@ -56,6 +56,7 @@ describe('what the patterns find', () => {
     ['NI number AB 12 34 56 C', 'ID_NUMBER', 'AB 12 34 56 C'],
     ['Tax ID: 12-3456789', 'ID_NUMBER', '12-3456789'],
     ['Date of birth: 12.03.1985', 'BIRTHDATE', '12.03.1985'],
+    ['Date of birth: 12 03 1985', 'BIRTHDATE', '12 03 1985'],
     ['She was born on March 3, 1985.', 'BIRTHDATE', 'March 3, 1985'],
     ['født den 3. marts 1985', 'BIRTHDATE', '3. marts 1985'],
     ['Passport no: X1234567', 'PASSPORT', 'X1234567'],

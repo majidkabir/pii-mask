@@ -63,7 +63,7 @@ You need Claude Code on a Mac, Linux or Windows computer, and Python 3.9 or newe
 
 When it's done, a message says **pii-mask is on** and the panel goes away. Nothing is sent to Claude while it installs.
 
-If the install fails, pii-mask turns itself **off**, and Claude Code works as if it weren't installed: your messages go to Claude without masking. The panel says why, gives you the exact command that fixes it, and has a **Retry** button; the status line shows `pii-mask: ⚠ off` until a retry succeeds. pii-mask is only on once its model is installed.
+If the install fails, nothing is sent to Claude. The panel says why, gives you the exact command that fixes it, and has a **Retry** button. To work without masking until it's fixed, type `/pii-mask off`: that lasts for the current session only.
 
 **3. Work as usual.** From then on, it starts by itself whenever you open Claude Code.
 
@@ -87,14 +87,14 @@ The pane updates while you work. It's only shown on your screen and is never sen
 ## Good to know
 
 - **When in doubt, it holds back.** If the model isn't ready or can't check something in time, that content is left out rather than sent. Claude tells you, and you can try again.
-- **Web searches stay private too.** When Claude searches the web or uses a connected service, it sends the placeholder, not the real value.
+- **Web searches and network commands stay private too.** When Claude searches the web, uses a connected service, or runs a command that sends data over the network (`curl`, `ssh`, `gh`, `git push`), it sends the placeholder, not the real value. Files Claude writes for you hold the real values, so pushing or uploading them sends what's in them.
 - **It's not perfect.** A name the model doesn't recognise goes through as written. And the rest of a sentence can still give someone away ("my sister, the only dentist in Skagen").
-- **Images take a few seconds.** Reading the text in an image takes 2–5 seconds on a laptop, more on an older one. One that can't be read in time is left out, never sent as it was. OCR can misread text, so in images long numbers and anything with an `@` are covered whether or not they look like personal data.
-- **Everything stays on your computer.** The model runs locally and stops by itself when you're not using it. To remove it completely, delete the folder `~/.cache/pii-mask` (on Windows: `%LOCALAPPDATA%\pii-mask`).
+- **Images: what can be read is covered.** pii-mask covers the text it can read in an image and the faces it finds. Handwriting, a signature, very small or stylised text, or a face it misses can stay visible. Reading an image takes 5–30 seconds ([performance](docs/performance.md)); one that can't be read in time is left out, never sent as it was. OCR misreads, so long numbers, ID numbers, an ID card's machine-readable lines and anything with an `@` are covered whether or not they look like personal data. Dates stay visible (a receipt's date), unless the image mentions a date of birth: then every date in it is covered.
+- **Everything stays on your computer.** The model runs locally and stops by itself when you're not using it. Only Claude Code under your user account can use it: it needs a key only you can read, and it refuses web pages. If two people use pii-mask on one computer, give one of them another port with `PII_MASK_PORT=8767`. To remove it completely, delete the folder `~/.cache/pii-mask` (on Windows: `%LOCALAPPDATA%\pii-mask`).
 
 ## Status
 
-This is an early experiment. It was built and tested with a stand-in for the real model, so the first runs on real machines will show how fast and how accurate it is.
+Young, and tested: every week on Linux, Windows and Macs (Apple and Intel) with the real model, on two public benchmarks ([results](docs/benchmark.md)), and in real Claude Code sessions. It hides most personal data, not all of it: `/pii-mask` shows what it hid.
 
 ## More
 
