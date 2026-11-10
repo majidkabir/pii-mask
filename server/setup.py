@@ -28,8 +28,8 @@ import time
 MODEL = "urchade/gliner_multi_pii-v1"
 # The model's files are fetched at this commit of its Hugging Face repository,
 # not whatever the repository holds on the day: its weights are a PyTorch file,
-# which can run code when loaded. None: the current one, whose commit is recorded.
-MODEL_REVISION = None
+# which can run code when loaded. Its commit since April 2024, the one checked.
+MODEL_REVISION = "1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d"
 GLINER = "gliner>=0.2.16,<0.3"
 # The PII model's tokenizer (mdeberta) is converted on first load, which needs
 # protobuf ("DebertaV2Converter requires the protobuf library") and sentencepiece.

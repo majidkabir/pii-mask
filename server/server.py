@@ -84,6 +84,7 @@ def peak_rss_mb():
             return None
 
 MODEL = "urchade/gliner_multi_pii-v1"
+MODEL_REVISION = "1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d"  # the commit setup.py fetches
 MAX_BODY = 16 * 1024 * 1024
 BATCH = 4  # chunks per model call; between calls a smaller waiting request goes first
 CACHE_SIZE = 20000  # chunks whose results are kept
@@ -124,13 +125,13 @@ def pieces(text):
 
 def installed_snapshot(cache):
     """The model's files at the commit setup.py fetched (installed.json's
-    revision), so the server loads exactly those; None for an install from
-    before 0.7.16, which loads what the cache holds."""
+    revision, else the pinned one), so the server loads exactly those; None
+    when the cache doesn't hold that commit (it then loads what it holds)."""
     try:
         with open(os.path.join(cache, "installed.json"), encoding="utf-8") as f:
-            revision = json.load(f).get("revision") or ""
+            revision = json.load(f).get("revision") or MODEL_REVISION
     except (OSError, ValueError):
-        return None
+        revision = MODEL_REVISION
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return None
     path = os.path.join(os.environ.get("HF_HOME") or os.path.join(cache, "hf"), "hub",
