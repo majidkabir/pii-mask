@@ -83,13 +83,16 @@ def report_size(cache, stop, baseline=0):
         say(f"SIZE {max(0, folder_size(cache) - baseline)}")
 
 
-def last_error(log_path):
-    """What went wrong, from the end of the log: pip's "ERROR: ..." line, or a
-    Python exception. When one exception caused another, the first one is the
-    real reason ("RuntimeError: Dynamo is not supported..." behind "Could not
-    import module ..."), so it is named first."""
+def last_error(log_path, start=0):
+    """What went wrong, from the log after byte `start` (where the failed step
+    began, so an earlier error the setup recovered from isn't named): pip's
+    "ERROR: ..." line, or a Python exception. When one exception caused
+    another, the first one is the real reason ("RuntimeError: Dynamo is not
+    supported..." behind "Could not import module ..."), so it is named first."""
     try:
-        lines = open(log_path, encoding="utf-8", errors="replace").read().splitlines()[-300:]
+        with open(log_path, "rb") as f:
+            f.seek(start)
+            lines = f.read().decode("utf-8", errors="replace").splitlines()[-300:]
     except OSError:
         return ""
     return error_in(lines)
@@ -239,12 +242,14 @@ def main():
                     HF_HOME=os.path.join(cache, "hf"), HF_HUB_DISABLE_SYMLINKS_WARNING="1")
 
     def run(cmd, what):
+        log.flush()
+        start = os.path.getsize(log_path)  # this step's output starts here
         log.write("$ " + " ".join(cmd) + "\n")
         log.flush()
         r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=base_env)
         log.flush()
         if r.returncode != 0:
-            detail = last_error(log_path)
+            detail = last_error(log_path, start)
             raise RuntimeError(f"{what} failed" + (f": {detail}" if detail else f" (exit {r.returncode}).") )
 
     stop = threading.Event()

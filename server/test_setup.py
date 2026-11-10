@@ -82,3 +82,23 @@ GLiNER could not load the tokenizer.""".splitlines()
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LastErrorTest(unittest.TestCase):
+    def test_an_error_the_setup_recovered_from_is_not_named(self):
+        import os
+        import tempfile
+
+        from setup import last_error
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "setup.log")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("$ pip install torch --index-url cpu\nERROR: No matching distribution found for torch\n"
+                        "CPU index not reachable; using the default PyTorch package\n")
+            start = os.path.getsize(path)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("$ python -c download\nTraceback (most recent call last):\n"
+                        "requests.exceptions.ConnectionError: huggingface.co is not reachable\n")
+            self.assertIn("huggingface.co", last_error(path, start))
+            self.assertIn("No matching distribution", last_error(path))
