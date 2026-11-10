@@ -56,7 +56,13 @@ type World = {
   jobs?: boolean
   /** How many starts it takes before the server runs (an old one still holds the port). */
   startsNeeded?: number
+  /** Something else answers on the port: another program, or another user's pii-mask (it can't prove the key). */
+  foreign?: 'other-app' | 'wrong-key'
 }
+
+const KEY = 'a'.repeat(64)
+const sha256Hex = async (text: string) =>
+  [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(b => b.toString(16).padStart(2, '0')).join('')
 
 const FINDS: Record<string, string> = {
   'Lars Holm': 'person',
@@ -68,10 +74,12 @@ const FINDS: Record<string, string> = {
 function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
   const cache = w.windows ? WIN_CACHE : CACHE
-  const files: Record<string, string> = { ...(w.installed === false ? {} : { [`${cache}/installed.json`]: '{}' }), ...w.files }
-  const seen = { jobPolls: 0, stopped: 0, mentioned: '', read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0 }
+  const files: Record<string, string> = { ...(w.installed === false ? {} : { [`${cache}/installed.json`]: '{}', [`${cache}/token`]: KEY }), ...w.files }
+  const seen = { jobPolls: 0, stopped: 0, mentioned: '', read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0, keys: [] as string[], sentToForeign: 0, cancelled: 0 }
   let up = w.up !== false
   let serverVersion = w.serverVersion
+  // A server since 0.7.16 proves it knows the key; an older one doesn't.
+  let proves = !w.serverVersion || !newerVersion('0.7.16', w.serverVersion)
   let starts = 0
   const finds = w.finds ?? FINDS
 
@@ -100,7 +108,8 @@ function world(on: On, w: World = {}) {
   on('ui.render', { component: 'UserMessage' }, ($, e) => ({ type: 'Text', props: {}, children: [e.props.text] }) as never)
   on('ui.render', { component: 'ToolUse' }, ($, e) => ({ type: 'Text', props: {}, children: [JSON.stringify(e.props.input)] }) as never)
   // On a Windows host the test kit hands paths over in Windows form (C:\\home\\u\\...): match either form.
-  const posix = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
+  // (On a Linux host the kit resolves a Windows path against the working folder: /work/C:\\Users\\...; drop that.)
+  const posix = (p: string) => p.replace(/^.*?(?=[A-Za-z]:\\)/, '').replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
   const keyOf = (p: string) => Object.keys(files).find(k => posix(k) === posix(p)) ?? p
   on('fs.read', ($, e) => {
     if (w.pluginVersion && posix(e.path).endsWith('/.claude-plugin/plugin.json')) return { value: JSON.stringify({ version: w.pluginVersion }) }
@@ -121,6 +130,8 @@ function world(on: On, w: World = {}) {
     if (e.argv.some(a => a.endsWith('server/server.py')) && !w.serverNeverStarts && ++starts >= (w.startsNeeded ?? 1)) {
       up = true
       serverVersion = w.pluginVersion
+      proves = true
+      files[`${cache}/token`] ??= KEY // the server makes its key on first start
     }
     if (e.argv[0] === 'pkill' || e.argv[0] === 'powershell') {
       seen.stopped += 1
@@ -147,10 +158,16 @@ function world(on: On, w: World = {}) {
   const answer = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
   const serve = async ($: unknown, e: { url: string; init?: { body?: string } }): Promise<any> => {
     if (!up) return { deny: 'connect ECONNREFUSED 127.0.0.1:8766' }
-    if (e.url.endsWith('/health')) {
+    const health = /\/health(?:\?nonce=(.*))?$/.exec(e.url)
+    if (health) {
+      if (w.foreign === 'other-app') return answer({ status: 'ok' })
       const has = !w.noMedia || seen.mediaAdded
-      return answer({ app: 'pii-mask', ok: true, model: 'test', version: serverVersion, media: { pdf: has, images: has, faces: has } })
+      const key = w.foreign === 'wrong-key' ? 'b'.repeat(64) : KEY
+      const proof = proves && health[1] ? { proof: await sha256Hex(`${key}:${health[1]}`) } : {}
+      return answer({ app: 'pii-mask', ok: true, model: 'test', version: serverVersion, media: { pdf: has, images: has, faces: has }, ...proof })
     }
+    seen.keys.push(String((e as { init?: { headers?: Record<string, string> } }).init?.headers?.['x-pii-mask-key'] ?? ''))
+    if (w.foreign) seen.sentToForeign += 1
     if (e.url.endsWith('/stop')) {
       seen.stopped += 1
       up = false
@@ -179,24 +196,38 @@ function world(on: On, w: World = {}) {
   }
   // A server since 0.7.9 runs a request as a job when asked: 202 with its id, then
   // GET /job/<id> (a long poll) until done. Here the first ask finds it unfinished.
-  const jobs: Record<string, { asked: boolean; status: number; body: unknown }> = {}
+  const jobs: Record<string, { asked: boolean; status: number; body: unknown; pending?: boolean }> = {}
   on('http.fetch', async ($, e) => {
+    if (/\/job\/\w+\/cancel$/.test(e.url)) {
+      seen.cancelled += 1
+      return answer({ cancelled: true })
+    }
     const job = /\/job\/(\w+)/.exec(e.url)?.[1]
     if (w.jobs && job) {
       seen.jobPolls += 1
       const j = jobs[job]
       if (!j) return { value: { status: 404, ok: false, headers: {}, text: '{}' } }
+      if (j.pending) {
+        await clock.sleep(20_000) // a long poll: answered when done or after its wait
+        if (j.pending) return answer({ done: false })
+      }
       if (!j.asked) {
         j.asked = true
         return answer({ done: false })
       }
       return answer({ done: true, status: j.status, body: j.body })
     }
-    const res = await serve($, e as never)
     const async = (JSON.parse(e.init?.body ?? '{}') as { async?: boolean }).async
-    if (!w.jobs || !async || !res.value) return res
+    if (!w.jobs || !async) return serve($, e as never)
     const id = String(Object.keys(jobs).length + 1)
-    jobs[id] = { asked: false, status: res.value.status, body: JSON.parse(res.value.text) }
+    jobs[id] = { asked: false, status: 0, body: null, pending: true }
+    const work = serve($, e as never).then(res => {
+      jobs[id] = res.value ? { asked: false, status: res.value.status, body: JSON.parse(res.value.text) } : { asked: true, status: 500, body: {} }
+      return res
+    })
+    // A quick request is done before the first ask; a slow one (slowMs) runs on while polled.
+    if (!(w.slowMs && seen.detects > (w.slowAfter ?? 0))) await work
+    if (!up) return { deny: 'connect ECONNREFUSED 127.0.0.1:8766' }
     return { value: { status: 202, ok: true, headers: {}, text: JSON.stringify({ job: id }) } }
   })
   // What the plugin passes down: what Claude Code stores and sends. (The row the
@@ -296,6 +327,16 @@ describe('masking with the model', () => {
     const written = Object.keys(seen.writes).find(p => p.replace(/\\/g, '/').endsWith(VAULT_FILE.slice(1)))
     const saved = JSON.parse((written && seen.writes[written]) ?? '{}')
     expect(saved.entries).toEqual([{ token: 'EMAIL_1', value: 'lars@holm.dk', label: 'EMAIL' }])
+  })
+
+  test('a command that sends data over the network keeps the placeholders; a local one gets real values', async ($, on) => {
+    const { seen } = world(on)
+    const stored = await appendPrompt($, 'Mail lars@holm.dk')
+    const p = ph('EMAIL', 1, markerIn(JSON.stringify(stored.message?.content)))
+    await $.tool.call({ tool: 'Bash', command: `curl -d "to=${p}" https://api.example.com/send` } as never)
+    expect(seen.ran).toBe(`curl -d "to=${p}" https://api.example.com/send`)
+    await $.tool.call({ tool: 'Bash', command: `grep -n ${p} contacts.csv` } as never)
+    expect(seen.ran).toBe('grep -n lars@holm.dk contacts.csv')
   })
 
   test('web search keeps the placeholders', async ($, on) => {
@@ -445,27 +486,77 @@ describe('the local model\'s life cycle', () => {
     expect(newerVersion('1.0.0', '0.9.9')).toBe(true)
   })
 
-  test('no Python: the install fails, so pii-mask is off and requests go through as written', async ($, on) => {
+  test('every request to the server carries its key, read from the cache folder', async ($, on) => {
+    const { seen } = world(on)
+    expect(JSON.stringify((await appendPrompt($, 'Write to Lars Holm')).message?.content)).toContain('PERSON_1')
+    expect(seen.keys.length).toBeGreaterThan(0)
+    expect(seen.keys.every(k => k === KEY)).toBe(true)
+  })
+
+  for (const foreign of ['wrong-key', 'other-app'] as const) {
+    test(`something else on the port (${foreign}): nothing is sent to it, and requests are held with how to fix it`, async ($, on) => {
+      const { seen, clock } = world(on, { foreign })
+      const pending = appendPrompt($, 'Write to Lars Holm')
+      await clock.advance(7000)
+      expect(JSON.stringify((await pending).message?.content)).not.toContain('Lars')
+      expect(seen.sentToForeign).toBe(0)
+      const chunks = await collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+      expect(textOf(chunks)).toContain('PII_MASK_PORT')
+      expect(seen.requestSent).toBe(false)
+    })
+  }
+
+  test('a job the mod gave up on is cancelled, so the server stops it and writes no late copy', async ($, on) => {
+    const { seen, clock } = world(on, { jobs: true, slowMs: 100_000 })
+    const pending = appendPrompt($, 'Write to Lars Holm')
+    await clock.advance(100_000)
+    await pending
+    expect(seen.cancelled).toBeGreaterThan(0)
+  })
+
+  test('no Python: the install fails, and requests are held (nothing sent) with how to fix it', async ($, on) => {
     const { seen, clock } = world(on, { up: false, installed: false, noPython: true })
     const pending = appendPrompt($, 'Write to Lars Holm')
     await clock.advance(7000)
-    expect(JSON.stringify((await pending).message?.content)).toContain('Write to Lars Holm')
-    await collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
-    expect(seen.requestSent).toBe(true)
-    expect(seen.status.at(-1)).toContain('off')
-    const { text } = await $.command.run({ command: 'pii-mask', args: 'status' } as never) as { text: string }
-    expect(text).toContain('Python 3.9 or newer is needed')
-    expect(text).toContain('without masking')
+    expect(JSON.stringify((await pending).message?.content)).not.toContain('Lars')
+    const chunks = await collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+    expect(seen.requestSent).toBe(false)
+    expect(textOf(chunks)).toContain('Python 3.9 or newer is needed')
+    expect(textOf(chunks)).toContain('/pii-mask off')
+    expect(seen.status.at(-1)).toContain('BLOCKED')
   })
 
-  test('a failed install is remembered: the next session is off at once and runs no setup; retry runs it again', async ($, on) => {
+  test('/pii-mask off after a failed install sends unmasked for this session; /pii-mask on holds again', async ($, on) => {
+    const { seen, clock } = world(on, { up: false, installed: false, noPython: true })
+    const pending = appendPrompt($, 'hello')
+    await clock.advance(7000)
+    await pending
+    const { text } = await $.command.run({ command: 'pii-mask', args: 'off' } as never) as { text: string }
+    expect(text).toContain('unmasked')
+    expect(JSON.stringify((await appendPrompt($, 'Write to Lars Holm', 'u2')).message?.content)).toContain('Write to Lars Holm')
+    await collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+    expect(seen.requestSent).toBe(true)
+    expect(seen.status.at(-1)).toContain('off for this session')
+    await $.command.run({ command: 'pii-mask', args: 'on' } as never)
+    expect(JSON.stringify((await appendPrompt($, 'Write to Lars Holm', 'u3')).message?.content)).not.toContain('Lars')
+  })
+
+  test('/pii-mask off does nothing while the model runs', async ($, on) => {
+    world(on)
+    await appendPrompt($, 'hello')
+    const { text } = await $.command.run({ command: 'pii-mask', args: 'off' } as never) as { text: string }
+    expect(text).toContain('running and masking')
+    expect(JSON.stringify((await appendPrompt($, 'Write to Lars Holm', 'u2')).message?.content)).toContain('PERSON_1')
+  })
+
+  test('a failed install is remembered: the next session holds requests at once and runs no setup; retry runs it again', async ($, on) => {
     const { seen, clock } = world(on, {
       installed: false,
       up: false,
       files: { [`${CACHE}/install-failed.json`]: JSON.stringify({ version: '', reason: 'installing PyTorch failed: boom', fix: '' }) },
     })
     const stored = await appendPrompt($, 'Write to Lars Holm')
-    expect(JSON.stringify(stored.message?.content)).toContain('Lars Holm')
+    expect(JSON.stringify(stored.message?.content)).not.toContain('Lars Holm')
     expect(seen.spawns).toHaveLength(0)
     await $.command.run({ command: 'pii-mask', args: 'retry' } as never)
     await clock.advance(1000)
@@ -695,11 +786,12 @@ describe('the panel above the prompt', () => {
     await pending
     const ui = await mountBand($)
     const drawn = JSON.stringify(await ui.drawn())
-    expect(drawn).toContain("pii-mask is off: it couldn't install its local model")
+    expect(drawn).toContain("pii-mask couldn't install its local model")
     expect(drawn).toContain('needs Python 3.12 or older')
     expect(drawn).toContain('To fix it: brew install python@3.12')
-    expect(drawn).toContain('without masking')
+    expect(drawn).toContain("Nothing is sent to Claude until it's ready")
     expect(await ui.find({ key: 'retry' })).toBeDefined()
+    expect(await ui.find({ key: 'off' })).toBeDefined()
     expect(await ui.find({ key: 'details' })).toBeDefined()
     await ui.unmount()
   })

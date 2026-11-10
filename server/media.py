@@ -181,10 +181,8 @@ class Media:
 
         img = fit(open_image(data))
         face_boxes = self.faces(img) if blur_faces else []
-        for x0, y0, x1, y1 in face_boxes:
-            region = img.crop((x0, y0, x1, y1))
-            small = region.resize((max(1, (x1 - x0) // 24), max(1, (y1 - y0) // 24)))
-            img.paste(small.resize(region.size), (x0, y0))
+        for box in face_boxes:
+            pixelate(img, box)
         draw = ImageDraw.Draw(img)
         for b in boxes:
             x0, y0, x1, y1 = (int(v) for v in b["box"])
@@ -213,6 +211,24 @@ def open_image(data):
     img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img)  # as the camera meant it, before the metadata is dropped
     return img.convert("RGB")
+
+
+FACE_BLOCKS = 7  # blocks across a face's longer side, whatever its size
+
+
+def pixelate(img, box):
+    """Replaces a face with a coarse mosaic: FACE_BLOCKS blocks across, however
+    many pixels it covers (a mosaic that scaled with the face left a selfie's
+    face recognisable), each block one flat colour."""
+    from PIL import Image
+
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    if w <= 0 or h <= 0:
+        return
+    scale = FACE_BLOCKS / max(w, h)
+    small = img.crop(box).resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.BOX)
+    img.paste(small.resize((w, h), Image.NEAREST), (x0, y0))
 
 
 def ink_box(img, margin=16):

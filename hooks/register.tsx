@@ -16,6 +16,7 @@ import {
   newMarker,
   parseVaultFile,
   PII_LABELS,
+  sendsOut,
   StreamUnmasker,
   systemNote,
   THRESHOLD,
@@ -53,8 +54,10 @@ import { imagePatterns, PATTERNS } from './patterns'
  */
 
 const NAME = 'pii-mask'
-const PORT = 8766
-const BASE = `http://127.0.0.1:${PORT}`
+const DEFAULT_PORT = 8766
+/** The server's port: 8766, or PII_MASK_PORT (two people on one computer each need their own). */
+let PORT = DEFAULT_PORT
+let BASE = `http://127.0.0.1:${PORT}`
 /**
  * Longest one model call may take. A hook's 10 s count only its own code, not
  * its calls to the local server (HookBudget), so this bounds how long a row
@@ -109,15 +112,18 @@ class EngineError extends Error {
   }
 }
 /**
- * The first-time install failed. pii-mask is then off: nothing is masked and
- * nothing is held, as if it weren't installed, until a retry succeeds. It is
- * only on once its model is installed. (Once installed, a model that stops
- * working holds requests instead: by then you rely on it.)
+ * The first-time install failed. Requests are held, as when the model stops,
+ * until a retry succeeds; `/pii-mask off` lets them through unmasked for the
+ * rest of the session, if you choose to work without it.
  */
 class InstallFailed extends EngineError {}
 /** Where a failed install is remembered, so a new session doesn't run it again until a retry or a new version. */
 const FAILED_FILE = 'install-failed.json'
 let engineTask: Promise<void> | undefined
+/** `/pii-mask off`: this session sends unmasked while the model isn't running. Never kept across sessions. */
+let letThrough = false
+/** Whether this row or request goes through as it is: only when you said so and the model isn't running. */
+const bypass = () => letThrough && engine.state !== 'ready' 
 /** Set when context Claude Code computes once was replaced by a note; re-rendered once the model runs. */
 let contextRedacted = false
 const nerCache = new Map<string, NerFind[]>()
@@ -129,12 +135,13 @@ function statusLine(): string {
   // requests are held too, but the line says what is happening.
   // Claude Code puts the plugin's name in front of its status, so it isn't repeated here.
   if (blocks.size) return '🔒 BLOCKED'
+  if (bypass()) return '⚠ off for this session: messages go to Claude unmasked (/pii-mask on)'
   switch (engine.state) {
     case 'ready': return '🔒 on'
     case 'installing': return `⏳ installing its model (${engine.detail || 'first run'})`
     case 'starting': return '⏳ starting its model'
     case 'failed': return '🔒 model not running'
-    case 'off': return '⚠ off: its model is not installed (/pii-mask retry)'
+    case 'off': return '🔒 BLOCKED: its model is not installed (/pii-mask retry)'
     default: return '⏳ checking its model'
   }
 }
@@ -159,9 +166,7 @@ function setEngine($: EngineInterface, state: EngineState, detail = engine.detai
   }
   if (state === 'failed' && was !== 'failed') say(`${NAME} can't start its model: ${detail}`)
   if (state === 'off' && was !== 'off') {
-    say(engine.fresh
-      ? `${NAME} couldn't install its model, so it is off: messages go to Claude without masking. /pii-mask retry tries again.`
-      : `${NAME} is off: its model isn't installed (the last try failed). /pii-mask retry tries again.`)
+    say(`${NAME} couldn't install its model, so nothing is sent to Claude. /pii-mask retry tries again; /pii-mask off sends unmasked for this session.`)
   }
   if (state === 'ready' && (was === 'installing' || was === 'failed' || was === 'off')) say(`${NAME} is on: personal data is masked from now on.`)
 }
@@ -170,7 +175,7 @@ function setEngine($: EngineInterface, state: EngineState, detail = engine.detai
 function showEngine($: EngineInterface): void {
   const view: EngineView = {
     state: engine.state, step: engine.step, steps: engine.steps, detail: engine.detail, fix: engine.fix,
-    mb: engine.mb, since: engine.since, now: Date.now(), folder: engine.cache, fresh: engine.fresh,
+    mb: engine.mb, since: engine.since, now: Date.now(), folder: engine.cache, fresh: engine.fresh, bypass: bypass(),
   }
   void update($, engineAtom, () => view).catch(() => undefined)
 }
@@ -214,16 +219,20 @@ function isOwnRow(texts: readonly string[]): boolean {
 function blocked(): string | undefined {
   const b = blocks.values().next().value
   if (b) return b
+  if (bypass()) return undefined // you chose to send unmasked
   switch (engine.state) {
     case 'ready':
-    case 'off': // the install failed: nothing is held, as if pii-mask weren't installed
       return undefined
+    case 'off':
+      return `pii-mask couldn't install its local model: ${engine.detail}` +
+        (engine.fix ? ` To fix it: ${engine.fix}.` : '') +
+        ' Then run /pii-mask retry. To work without masking in this session, run /pii-mask off.'
     case 'installing':
       return `pii-mask is installing its local model, once (about 1–2 GB; now: ${engine.detail || 'starting'}). ` +
         'Send your message again when the status line shows "pii-mask: 🔒 on".'
     case 'failed':
       return `pii-mask can't run its local model: ${engine.detail}` +
-        (engine.fix ? ` To fix it: ${engine.fix}.` : '') + ' Then run /pii-mask retry.'
+        (engine.fix ? ` To fix it: ${engine.fix}.` : '') + ' Then run /pii-mask retry. To work without masking in this session, run /pii-mask off.'
     default:
       return 'pii-mask is starting its local model. Send your message again in a few seconds.'
   }
@@ -244,19 +253,71 @@ async function withTimeout<T>($: EngineInterface, p: Promise<T>, ms: number): Pr
 
 /** The version of the mod the running server came with; '' before 0.7.2, which didn't say. */
 let serverVersion = ''
+/**
+ * The server's key, from <cache>/token (made by the server, readable by this
+ * user alone). Every request carries it; without it the server answers nothing
+ * but /health, so a web page or another program can't use it.
+ */
+let serverKey = ''
+
+async function readKey($: EngineInterface): Promise<string> {
+  try {
+    serverKey = (await $.fs.read(`${engine.cache || (await cacheDir($))}/token`)).trim()
+  } catch {
+    serverKey = ''
+  }
+  return serverKey
+}
+
+const keyHeader = () => ({ 'x-pii-mask-key': serverKey })
+
+async function sha256Hex(text: string): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * Who answers on the port: this user's server (it proves it knows the key),
+ * one from before 0.7.16 (no proof, an older version: replaced), something
+ * else (another program, another user's pii-mask: nothing is sent to it), or
+ * nothing.
+ */
+type Health = 'ours' | 'old' | 'foreign' | 'down'
+
+async function probe($: EngineInterface): Promise<Health> {
+  let body: { app?: string; media?: MediaStatus; version?: string; proof?: unknown }
+  const nonce = crypto.randomUUID()
+  try {
+    const res = await withTimeout($, $.http.fetch(`${BASE}/health?nonce=${nonce}`), 1500)
+    body = JSON.parse(res.text) as typeof body
+    if (!res.ok || body.app !== NAME) return 'foreign'
+  } catch {
+    return 'down'
+  }
+  serverVersion = String(body.version ?? '')
+  if (typeof body.proof === 'string') {
+    const proves = async () => !!serverKey && body.proof === (await sha256Hex(`${serverKey}:${nonce}`))
+    if (!(await proves())) {
+      await readKey($) // not read yet, or the server was started again with a new key
+      if (!(await proves())) return 'foreign'
+    }
+    mediaStatus = body.media ?? {}
+    mediaCheckedAt = Date.now()
+    return 'ours'
+  }
+  const mine = await pluginVersion($)
+  return mine && newerVersion(mine, serverVersion) ? 'old' : 'foreign'
+}
 
 async function serverUp($: EngineInterface): Promise<boolean> {
-  try {
-    const res = await withTimeout($, $.http.fetch(`${BASE}/health`), 1500)
-    const body = JSON.parse(res.text) as { app?: string; media?: MediaStatus; version?: string }
-    mediaStatus = body.media ?? {}
-    serverVersion = String(body.version ?? '')
-    mediaCheckedAt = Date.now()
-    return res.ok && body.app === NAME
-  } catch {
-    return false
-  }
+  return (await probe($)) === 'ours'
 }
+
+/** Another program (or another user's pii-mask) holds the port: nothing is sent to it. */
+const portTaken = () => new EngineError(
+  `port ${PORT} on this computer is used by another program, or by pii-mask run by another user, so pii-mask can't use it.`,
+  `start Claude Code with PII_MASK_PORT set to a free port (for example PII_MASK_PORT=${PORT + 1}), or stop what uses port ${PORT}, then /pii-mask retry`,
+)
 
 async function isWindows($: EngineInterface): Promise<boolean> {
   return (await $.env.get('OS')) === 'Windows_NT'
@@ -337,7 +398,10 @@ async function pluginVersion($: EngineInterface): Promise<string> {
 }
 
 async function runEngine($: EngineInterface, retry: boolean): Promise<void> {
-  if ((await serverUp($)) && !(await replaceOlderServer($))) return engineReady($)
+  const health = await probe($)
+  if (health === 'ours' && !(await replaceOlderServer($))) return engineReady($)
+  if (health === 'old' && !(await stopServer($))) throw portTaken()
+  if (health === 'foreign') throw portTaken()
   const dir = await cacheDir($)
   engine.cache = dir
   const fake = (await $.env.get('PII_MASK_FAKE_MODEL')) === '1'
@@ -389,9 +453,14 @@ async function runEngine($: EngineInterface, retry: boolean): Promise<void> {
 async function replaceOlderServer($: EngineInterface): Promise<boolean> {
   const mine = await pluginVersion($)
   if (!mine || !newerVersion(mine, serverVersion)) return false
+  return stopServer($)
+}
+
+/** Stops the server on the port (one of this user's); true once it no longer answers. */
+async function stopServer($: EngineInterface): Promise<boolean> {
   try {
     if (serverVersion) {
-      await withTimeout($, $.http.fetch(`${BASE}/stop`, { method: 'POST' }), 1500)
+      await withTimeout($, $.http.fetch(`${BASE}/stop`, { method: 'POST', headers: keyHeader() }), 1500)
     } else if (await isWindows($)) {
       // Servers before 0.7.2 have no /stop.
       const find = `Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*server.py*--port ${PORT}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
@@ -404,7 +473,7 @@ async function replaceOlderServer($: EngineInterface): Promise<boolean> {
   }
   for (let waited = 0; waited < 5000; waited += 250) {
     await $.clock.sleep(250)
-    if (!(await serverUp($))) return true
+    if ((await probe($)) === 'down') return true
   }
   return false
 }
@@ -453,7 +522,10 @@ async function startServer($: EngineInterface, python: string[], dir: string, ro
   const argv = [...serverPython, `${root}/server/server.py`, '--daemon', '--port', String(PORT), '--cache', dir, ...(fake ? ['--fake'] : [])]
   await $.process.run(argv, { timeoutMs: 30_000 })
   for (let waited = 0; waited < START_LIMIT_MS; waited += 1000) {
-    if (await serverUp($)) return engineReady($)
+    const health = await probe($)
+    if (health === 'ours') return engineReady($)
+    // Something that isn't this user's server holds the port: waiting won't change that.
+    if (health === 'foreign' && waited >= 5000) throw portTaken()
     // A server that was just asked to stop (an older version) may still hold the port, and the
     // start above then exits at once: start again for a while. While one loads, a start exits quietly.
     if (waited > 0 && waited % 5000 === 0 && waited <= 30_000) await $.process.run(argv, { timeoutMs: 30_000 }).catch(() => undefined)
@@ -543,8 +615,7 @@ async function addMediaSupport($: EngineInterface, retry = false): Promise<void>
  */
 async function needEngine($: EngineInterface): Promise<void> {
   if (engine.state === 'ready') return
-  if (engine.state === 'off') throw new Error('pii-mask is off')
-  if (engine.state === 'installing' || engine.state === 'failed') throw new Error(blocked())
+  if (engine.state === 'off' || engine.state === 'installing' || engine.state === 'failed') throw new Error(blocked())
   const task = startEngine($)
   const state = (): EngineState => engine.state // read fresh: other tasks change it while this waits
   for (let waited = 0; waited < WAIT_FOR_START_MS; waited += 250) {
@@ -567,17 +638,22 @@ async function serverCall(
   $: EngineInterface, path: string, body: Record<string, unknown>, ms: number,
 ): Promise<{ ok: boolean; status: number; text: string }> {
   let stopped = false
+  let job: string | undefined
+  let done = false
   const run = async () => {
     const res = await $.http.fetch(`${BASE}${path}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, async: true }),
+      method: 'POST', headers: { 'content-type': 'application/json', ...keyHeader() }, body: JSON.stringify({ ...body, async: true }),
     })
     if (res.status !== 202) return res
-    const { job } = JSON.parse(res.text) as { job: string }
+    job = (JSON.parse(res.text) as { job: string }).job
     while (!stopped) {
-      const r = await $.http.fetch(`${BASE}/job/${job}?wait=20`)
+      const r = await $.http.fetch(`${BASE}/job/${job}?wait=20`, { headers: keyHeader() })
       if (!r.ok) throw new Error(`the model server lost job ${job} (HTTP ${r.status})`)
       const j = JSON.parse(r.text) as { done: boolean; status?: number; body?: unknown }
-      if (j.done) return { ok: (j.status ?? 500) < 300, status: j.status ?? 500, text: JSON.stringify(j.body) }
+      if (j.done) {
+        done = true
+        return { ok: (j.status ?? 500) < 300, status: j.status ?? 500, text: JSON.stringify(j.body) }
+      }
     }
     throw new Error('stopped')
   }
@@ -585,6 +661,8 @@ async function serverCall(
     return await withTimeout($, run(), ms)
   } finally {
     stopped = true
+    // Gave up on it: the server stops it between steps and writes no copy the Read went on without.
+    if (job !== undefined && !done) void $.http.fetch(`${BASE}/job/${job}/cancel`, { method: 'POST', headers: keyHeader() }).catch(() => undefined)
   }
 }
 
@@ -652,6 +730,11 @@ function ready($: EngineInterface): Promise<void> {
 }
 
 async function load($: EngineInterface): Promise<void> {
+  const port = Number(await $.env.get('PII_MASK_PORT'))
+  if (Number.isInteger(port) && port >= 1024 && port <= 65535) {
+    PORT = port
+    BASE = `http://127.0.0.1:${PORT}`
+  }
   const { version } = await $.session.version()
   if (compareVersions(version, MIN_CLAUDE_CODE) < 0) {
     blocks.set('version', `Claude Code ${version} is older than ${MIN_CLAUDE_CODE}, the oldest version pii-mask is tested on. Run \`claude update\`.`)
@@ -1187,7 +1270,7 @@ export const register: Register = on => {
   // the hook and keep the row as it was, to be sent with every later request.
   on('session.append', async ($, e, next) => {
     await ready($)
-    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
+    if (bypass()) return next(e) // /pii-mask off: sent as it is
     const before = vault.size
     const prepared = await prepareMedia($, e.message.content as Block[])
     const texts = textsOf(prepared)
@@ -1214,14 +1297,14 @@ export const register: Register = on => {
     return next({ ...e, message: { ...e.message, content } })
   }).catch(($, e, next) =>
     next.called ? next(e)
-    : engine.state === 'off' ? next(e) // went off while this row waited for the model
+    : bypass() ? next(e) // /pii-mask off while this row waited for the model
     : next({ ...e, message: { ...e.message, content: redactContent(e.message.content) } }),
   )
 
   // The session title: set from the masked prompt, so the raw prompt is never sent to title it.
   on('classic.UserPromptSubmit', async ($, e, next) => {
     await ready($)
-    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
+    if (bypass()) return next(e) // /pii-mask off: sent as it is
     if (sessionFile === undefined && e.agent_id === undefined) await attach($, e.transcript_path, 'startup')
     const before = vault.size
     const result = await next(e)
@@ -1229,7 +1312,7 @@ export const register: Register = on => {
     const title = mask(e.prompt, await rulesFor($, [e.prompt]), vault).replace(/\s+/g, ' ').trim().slice(0, 60)
     await persist($, before)
     return { ...result, sessionTitle: title }
-  }).catch(async ($, e, next) => (engine.state === 'off' ? next(e) : { ...(await next(e)), sessionTitle: `${NAME}: title withheld` }))
+  }).catch(async ($, e, next) => (bypass() ? next(e) : { ...(await next(e)), sessionTitle: `${NAME}: title withheld` }))
 
   // The model's reply: unmask as it streams. While the model isn't running, or
   // the session is blocked, answer locally so nothing is sent.
@@ -1298,7 +1381,7 @@ export const register: Register = on => {
   ).catch(($, e, next) => (next.called ? undefined : next(e)))
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
-    if (keepsPlaceholders(e.props.tool)) return next(e)
+    if (sendsOut(keepsPlaceholders, e.props.tool, e.props.input)) return next(e) // shown as it was sent
     const input = unmaskDeep(e.props.input, vault) as { file_path?: unknown }
     // A Read pointed at a redacted copy shows the file you asked for.
     const original = [...readCopiesShown.entries()].find(([copy]) => copy === input.file_path)?.[1]
@@ -1306,11 +1389,14 @@ export const register: Register = on => {
   }).catch(($, e, next) => (next.called ? undefined : next(e)))
 
   // The model's tool calls: real values back in the arguments, except for
-  // tools that would send them off this machine (web tools, every MCP tool).
+  // tools that would send them off this machine (web tools, every MCP tool,
+  // network commands).
   on('tool.call', async ($, e, next) => {
     await ready($)
     if (e.tool === 'WebSearch' || e.tool === 'WebFetch') webCalls.add(String(e.tool_use_id ?? ''))
-    const call = keepsPlaceholders(String(e.tool)) ? e : unmaskDeep(e, vault, TOOL_ENVELOPE)
+    // A web or MCP tool, or a command that sends data over the network itself (curl, ssh, gh,
+    // git push...), gets the placeholders: what it sends leaves this machine.
+    const call = sendsOut(keepsPlaceholders, String(e.tool), e) ? e : unmaskDeep(e, vault, TOOL_ENVELOPE)
     if (e.tool === 'Read' && engine.state === 'ready') {
       const path = String((call as { file_path?: unknown }).file_path ?? '')
       let copy: string | undefined
@@ -1332,7 +1418,7 @@ export const register: Register = on => {
   // The system prompt: mask the per-session sections and explain the placeholders.
   on('prompt.compose', async ($, e, next) => {
     await ready($)
-    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
+    if (bypass()) return next(e) // /pii-mask off: sent as it is
     const before = vault.size
     const { sections } = await next(e)
     const own = sections.filter(s => s.scope === 'session').map(s => s.text)
@@ -1341,7 +1427,7 @@ export const register: Register = on => {
     await persist($, before)
     return { sections: [...masked, { id: `${NAME}:note`, text: systemNote(vault), scope: 'session' as const }] }
   }).catch(async ($, e, next) => {
-    if (engine.state === 'off') return next(e)
+    if (bypass()) return next(e)
     const { sections } = await next(e)
     // The note holds no personal data, so it is sent even when the sections couldn't be checked:
     // without it, Claude takes the placeholders for missing values and says so.
@@ -1356,7 +1442,7 @@ export const register: Register = on => {
   // CLAUDE.md and the other blocks of the first message (computed once per conversation).
   on('prompt.context', async ($, e, next) => {
     await ready($)
-    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
+    if (bypass()) return next(e) // /pii-mask off: sent as it is
     const before = vault.size
     const result = await next(e)
     const rules = result.blocks.length ? await rulesFor($, result.blocks.map(b => b.text)) : []
@@ -1364,7 +1450,7 @@ export const register: Register = on => {
     await persist($, before)
     return { ...result, blocks }
   }).catch(async ($, e, next) => {
-    if (engine.state === 'off') return next(e)
+    if (bypass()) return next(e)
     contextRedacted = true
     const result = await next(e)
     return { ...result, blocks: result.blocks.map(b => ({ ...b, text: UNCHECKED_NOTE })) }
@@ -1379,9 +1465,9 @@ export const register: Register = on => {
     // outlasts it is skipped and the file read as it is.
     const swap = await withTimeout($, (async () => {
       await ready($)
-      return engine.state === 'off' ? undefined : mentionCopy($, e.path)
+      return bypass() ? undefined : mentionCopy($, e.path)
     })(), MENTION_BUDGET_MS)
-    if (!swap) return next(e) // the install failed: nothing is masked
+    if (!swap) return next(e) // /pii-mask off: attached as it is
     if ('deny' in swap) {
       mediaDropped += 1
       return { deny: swap.deny }
@@ -1391,19 +1477,19 @@ export const register: Register = on => {
     if (result.deny !== undefined || !swap.context) return result
     return { ...result, context: [...(result.context ?? []), swap.context] }
   }).catch(($, e, next) =>
-    next.called || engine.state === 'off' ? next(e) : { deny: `${NAME} could not check ${e.path} in time, so it was not attached` },
+    next.called || bypass() ? next(e) : { deny: `${NAME} could not check ${e.path} in time, so it was not attached` },
   )
 
   on('prompt.attachment', async ($, e, next) => {
     await ready($)
-    if (engine.state === 'off') return next(e) // the install failed: nothing is masked
+    if (bypass()) return next(e) // /pii-mask off: sent as it is
     const before = vault.size
     const result = await next(e)
     if (result.text === null) return result
     const masked = { text: mask(result.text, await rulesFor($, [result.text]), vault) }
     await persist($, before)
     return masked
-  }).catch(($, e, next) => (engine.state === 'off' && !next.called ? next(e) : { text: null }))
+  }).catch(($, e, next) => (bypass() && !next.called ? next(e) : { text: null }))
 
   on('classic.SessionStart', async ($, e, next) => {
     await ready($)
@@ -1425,8 +1511,8 @@ export const register: Register = on => {
     await reserveFromTranscript($)
     await $.command.register({
       name: 'pii-mask',
-      description: 'Open the pane listing everything pii-mask has masked; "status" prints it, "media" switches image and PDF handling, "retry" restarts the model.',
-      argumentHint: '[status|media [pdf|images|faces|image-text] [on|off]|retry]',
+      description: 'Open the pane listing everything pii-mask has masked; "status" prints it, "media" switches image and PDF handling, "retry" restarts the model, "off" sends unmasked while it can\'t run.',
+      argumentHint: '[status|media [pdf|images|faces|image-text] [on|off]|retry|off|on]',
     })
     publishStatus($)
     return next(e)
@@ -1443,8 +1529,21 @@ export const register: Register = on => {
       return { text: own('Starting the local model again. The status line shows when it is ready.') }
     }
     if (arg === 'media' || arg.startsWith('media ')) return { text: own(await mediaCommand($, arg.slice(5).trim())) }
+    if (arg === 'off') {
+      if (engine.state === 'ready') {
+        return { text: own('pii-mask is running and masking. To stop using it, disable the plugin with /plugin.') }
+      }
+      letThrough = true
+      publishStatus($)
+      return { text: own('pii-mask is off for this session: messages go to Claude unmasked until its model runs. /pii-mask on holds them again.') }
+    }
+    if (arg === 'on') {
+      letThrough = false
+      publishStatus($)
+      return { text: own(engine.state === 'ready' ? 'pii-mask is on.' : 'pii-mask holds messages again until its model runs.') }
+    }
     if (arg !== '' && arg !== 'status') {
-      return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, /pii-mask media, or /pii-mask retry.') }
+      return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, /pii-mask media, /pii-mask retry, or /pii-mask off.') }
     }
     if (arg === '') {
       const opened = await $.ui.open({ id: PANE, title: 'Masked by pii-mask', focus: true })
@@ -1454,8 +1553,8 @@ export const register: Register = on => {
     return {
       text: own(
         [
-          `${NAME}: ${engine.state === 'off'
-            ? `off: its model is not installed (${engine.detail}). Messages go to Claude without masking. /pii-mask retry tries again.`
+          `${NAME}: ${bypass()
+            ? 'off for this session (/pii-mask off): messages go to Claude without masking. /pii-mask on holds them again.'
             : blocked() ?? 'on, the local model is running.'}`,
           `Model: ${engine.state}${engine.detail ? ` (${engine.detail})` : ''}, GLiNER PII on ${BASE}`,
           `Model calls: ${nerStats.calls} (${nerStats.calls ? Math.round(nerStats.ms / nerStats.calls) : 0} ms on average), failed: ${nerStats.failures}`,
@@ -1475,8 +1574,7 @@ export const register: Register = on => {
     const view = await read($, engineAtom)
     const block = blocks.values().next().value
     const lines = engineLines(view, block)
-    // Off since an earlier session: the status line says so; the panel is for the session it failed in.
-    if (lines.length === 0 || e.props.hasSurvey || (view.state === 'off' && !view.fresh)) return next(e)
+    if (lines.length === 0 || e.props.hasSurvey) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
@@ -1484,6 +1582,9 @@ export const register: Register = on => {
         {(view.state === 'failed' || view.state === 'off') && !block && (
           <Box flexDirection="row" gap={2}>
             <Button key="retry" label="Retry" onPress={() => { setEngine($, 'unknown', ''); void startEngine($, true) }} />
+            {view.bypass
+              ? <Button key="hold" label="Hold messages again" onPress={() => { letThrough = false; publishStatus($) }} />
+              : <Button key="off" label="Send unmasked this session" onPress={() => { letThrough = true; publishStatus($) }} />}
             <Button key="details" label="Details" onPress={() => { void $.ui.open({ id: PANE, title: 'Masked by pii-mask', focus: true }) }} />
           </Box>
         )}
@@ -1577,6 +1678,13 @@ export type ViewLine = { text: string; tone?: 'title' | 'error' | 'fix' | 'dim' 
 export function engineLines(view: EngineView, block?: string): ViewLine[] {
   const waiting = "Nothing is sent to Claude until it's ready."
   if (block) return [{ text: '⚠ pii-mask is stopping every request', tone: 'error' }, { text: block }]
+  if (view.bypass && view.state !== 'ready') {
+    return [
+      { text: '⚠ pii-mask is off for this session: messages go to Claude unmasked', tone: 'error' },
+      { text: view.detail },
+      { text: 'Press Retry to install or start its model, or Hold messages again (/pii-mask on).', tone: 'dim' },
+    ]
+  }
   switch (view.state) {
     case 'ready':
       return []
@@ -1594,24 +1702,14 @@ export function engineLines(view: EngineView, block?: string): ViewLine[] {
       ]
     }
     case 'failed':
-      return [
-        { text: "⚠ pii-mask can't start its local model", tone: 'error' },
-        { text: view.detail },
-        ...(view.fix ? [{ text: `To fix it: ${view.fix}`, tone: 'fix' as const }] : []),
-        {
-          text: `Then press Retry or type /pii-mask retry. ${waiting}` +
-            (view.folder ? ` Logs: ${view.folder}/setup.log and server.log` : ''),
-          tone: 'dim',
-        },
-      ]
     case 'off':
       return [
-        { text: "⚠ pii-mask is off: it couldn't install its local model", tone: 'error' },
+        { text: view.state === 'off' ? "⚠ pii-mask couldn't install its local model" : "⚠ pii-mask can't start its local model", tone: 'error' },
         { text: view.detail },
         ...(view.fix ? [{ text: `To fix it: ${view.fix}`, tone: 'fix' as const }] : []),
         {
-          text: 'Messages go to Claude without masking until it is installed. Press Retry or type /pii-mask retry.' +
-            (view.folder ? ` Log: ${view.folder}/setup.log` : ''),
+          text: `Then press Retry or type /pii-mask retry. ${waiting} To work without masking in this session: /pii-mask off.` +
+            (view.folder ? ` Logs: ${view.folder}/setup.log and server.log` : ''),
           tone: 'dim',
         },
       ]

@@ -6,7 +6,7 @@ export type VaultEntry = {
 
 /** What the panel above the prompt and the pane show about the local model. */
 export type EngineView = {
-  /** 'off': the first-time install failed, so nothing is masked until a retry succeeds. */
+  /** 'off': the first-time install failed: requests are held until a retry succeeds or /pii-mask off. */
   state: 'unknown' | 'installing' | 'starting' | 'ready' | 'failed' | 'off'
   /** The install step (1-based) and how many there are; 0 outside the install. */
   step: number
@@ -22,8 +22,10 @@ export type EngineView = {
   now: number
   /** Where the install and server logs are. */
   folder: string
-  /** The install failed in this session (not remembered from an earlier one), so the panel shows it. */
+  /** The install failed in this session (not remembered from an earlier one). */
   fresh?: boolean
+  /** /pii-mask off: messages go to Claude unmasked, for this session, until the model runs. */
+  bypass?: boolean
 }
 
 declare module 'claude-code' {
