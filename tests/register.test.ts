@@ -520,7 +520,8 @@ describe('the local model\'s life cycle', () => {
     })
   }
 
-  test('a job the mod gave up on is cancelled, so the server stops it and writes no late copy', async ($, on) => {
+  // Polls its way through 100 s of the test clock: more than the default 5 s of real time on a slow machine.
+  test('a job the mod gave up on is cancelled, so the server stops it and writes no late copy', { timeoutMs: 30_000 }, async ($, on) => {
     const { seen, clock } = world(on, { jobs: true, slowMs: 100_000 })
     const pending = appendPrompt($, 'Write to Lars Holm')
     await clock.advance(100_000)
