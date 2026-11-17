@@ -16,10 +16,11 @@ jobs:
       fail-fast: false
       matrix:
         model: [gliner, gliner2]
-    env:
-      HF_HOME: ${{ runner.temp }}/hf
-      PII_MASK_CACHE: ${{ runner.temp }}/pii
     steps:
+      - name: Folders
+        run: |
+          echo "HF_HOME=$RUNNER_TEMP/hf" >> "$GITHUB_ENV"
+          echo "PII_MASK_CACHE=$RUNNER_TEMP/pii" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
