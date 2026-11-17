@@ -26,6 +26,10 @@ export type EngineView = {
   fresh?: boolean
   /** /pii-mask off: messages go to Claude unmasked, for this session, until the model runs. */
   bypass?: boolean
+  /** Claude Code's security default runs before pii-mask (Team, Enterprise, managed settings); the band says so until dismissed. */
+  passedOver?: boolean
+  /** The exact steps to put pii-mask first, for this computer (/pii-mask fix). */
+  howToFix?: string[]
 }
 
 declare module 'claude-code' {

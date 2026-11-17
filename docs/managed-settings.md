@@ -17,11 +17,13 @@ Your prompts and tool results (files Claude reads, command output) are still mas
 | CLAUDE.md and the system prompt | `prompt.context`, `prompt.compose` |
 | Reminders and hook output Claude Code adds | `session.append` (attachments, hook output) |
 
-Since 0.7.18 pii-mask notices this and checks those parts before each request. A request where they hold personal data is stopped, and you're told which file and what kind of data. The status line says `on; attachments and CLAUDE.md are checked, not masked`. You can then remove it (`/rewind`, or edit the file), or send it unmasked for the session with `/pii-mask allow-unmasked`.
+Since 0.7.18 pii-mask notices this at the first request, shows a note above the prompt, and checks those parts before each request. A request where they hold personal data is stopped, and you're told which file and what kind of data. The status line says `on; attachments and CLAUDE.md are checked, not masked`. You can then remove it (`/rewind`, or edit the file), or send it unmasked for the session with `/pii-mask allow-unmasked`.
 
 To have them masked instead, list pii-mask in managed settings, as below. It then runs before the security default and sees everything.
 
 ## How
+
+**The quick way:** type `/pii-mask fix` in Claude Code. It prints the command for your computer: it creates the file below, or adds the three keys to the one you have and keeps what's in it. Run it in a terminal, then restart Claude Code. The steps below do the same by hand.
 
 Managed settings are a file only an administrator can write. On your own computer that is you, with `sudo`. On a computer your company manages, ask IT to add the lines below.
 

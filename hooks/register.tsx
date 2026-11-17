@@ -180,6 +180,7 @@ function showEngine($: EngineInterface): void {
   const view: EngineView = {
     state: engine.state, step: engine.step, steps: engine.steps, detail: engine.detail, fix: engine.fix,
     mb: engine.mb, since: engine.since, now: Date.now(), folder: engine.cache, fresh: engine.fresh, bypass: bypass(),
+    passedOver: passedOver && !passedOverDismissed && engine.state === 'ready', howToFix,
   }
   void update($, engineAtom, () => view).catch(() => undefined)
 }
@@ -993,7 +994,7 @@ async function claudeMdFiles($: EngineInterface): Promise<{ path: string; text: 
  * couldn't mask holds personal data; undefined when nothing does.
  */
 async function passedOverHold($: EngineInterface, agentId: string | undefined): Promise<string | undefined> {
-  const fix = `To fix it, list pii-mask in your managed settings (${MANAGED_DOC}). ` +
+  const fix = 'To fix it for good, type /pii-mask fix: it shows the exact steps for this computer. ' +
     'Until then, remove it (/rewind, or edit the file), or send it unmasked for this session with /pii-mask allow-unmasked.'
   const why = (what: string, kinds: readonly string[]) =>
     `${what} holds personal data (${kinds.join(', ')}) that pii-mask can't mask here: on this setup Claude Code's ` +
@@ -1017,14 +1018,84 @@ async function passedOverHold($: EngineInterface, agentId: string | undefined): 
   return kinds.length ? why('Text Claude Code added to the conversation (an @-mentioned file, a reminder or a hook\'s output)', kinds) : undefined
 }
 
+/** The keys that put pii-mask first in managed settings (docs/managed-settings.md). */
+const MANAGED_KEYS = {
+  extraKnownMarketplaces: { [NAME]: { source: { source: 'github', repo: 'majidkabir/pii-mask' } } },
+  enabledPlugins: { [`${NAME}@${NAME}`]: true },
+  prependPlugins: [`${NAME}@${NAME}`, 'sec-default@builtin'],
+}
+/** The band above the prompt about it, dismissed for this session. */
+let passedOverDismissed = false
+/** The steps for this computer, worked out once it is passed over. */
+let howToFix: string[] | undefined
+
+/**
+ * The exact steps to put pii-mask first on this computer: its managed settings
+ * file, created or with the three keys merged into what it holds.
+ */
+async function fixSteps($: EngineInterface): Promise<string[]> {
+  const windows = await isWindows($)
+  const mac = !windows && ((await $.session.info().then(i => i.platform).catch(() => undefined)) === 'macos' ||
+    (await $.fs.exists('/System/Library/CoreServices').catch(() => false)))
+  const dir = mac ? '/Library/Application Support/ClaudeCode'
+    : windows ? 'C:\\Program Files\\ClaudeCode'
+    : '/etc/claude-code'
+  const file = `${dir}${windows ? '\\' : '/'}managed-settings.json`
+  let current: Record<string, unknown> | undefined
+  let unreadable = false
+  try {
+    const parsed = JSON.parse(await $.fs.read(file)) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) current = parsed as Record<string, unknown>
+    else unreadable = true
+  } catch (err) {
+    if (await $.fs.exists(file).catch(() => false)) unreadable = true
+    void err
+  }
+  const id = `${NAME}@${NAME}`
+  const it = 'If your company manages this computer, send these steps to IT: only an administrator can change this file.'
+  if (unreadable) {
+    return [
+      `Your managed settings file (${file}) isn't valid JSON, so Claude Code can't read it. Fix it first, then add:`,
+      JSON.stringify(MANAGED_KEYS, null, 2),
+      'Restart Claude Code afterwards.', it,
+    ]
+  }
+  const listed = Array.isArray(current?.prependPlugins) ? (current!.prependPlugins as unknown[]).map(String) : undefined
+  const merged = {
+    ...current,
+    extraKnownMarketplaces: { ...(current?.extraKnownMarketplaces as object | undefined), ...MANAGED_KEYS.extraKnownMarketplaces },
+    enabledPlugins: { ...(current?.enabledPlugins as object | undefined), ...MANAGED_KEYS.enabledPlugins },
+    // An organization's own list keeps its order (and its choice on sec-default); pii-mask goes first.
+    prependPlugins: listed ? [id, ...listed.filter(p => p !== id)] : MANAGED_KEYS.prependPlugins,
+  }
+  if (current && JSON.stringify(merged) === JSON.stringify({ ...current, prependPlugins: listed })) {
+    return [
+      `Your managed settings (${file}) already put pii-mask first. Restart Claude Code to load them.`,
+      'Still passed over after a restart: run `claude --debug` and look in the log for "pii-mask@pii-mask loaded (…, tier prepend)"; "tier user" means the file isn\'t read.',
+      it,
+    ]
+  }
+  const json = JSON.stringify(merged, null, 2)
+  const command = windows
+    ? `In PowerShell, run as administrator:\nNew-Item -ItemType Directory -Force "${dir}" | Out-Null; Set-Content -Path "${file}" -Encoding utf8 -Value @'\n${json}\n'@`
+    : `In a terminal:\nsudo mkdir -p "${dir}" && sudo tee "${file}" > /dev/null <<'EOF'\n${json}\nEOF`
+  return [
+    `1. ${current ? `Your managed settings file (${file}) gets the three keys that put pii-mask first; what it holds now is kept.` : `Create the managed settings file (${file}) with the three keys that put pii-mask first.`} ${command}`,
+    '2. Restart Claude Code. The "hook was skipped" lines are gone, and pii-mask masks @-mentioned files, CLAUDE.md and reminders too.',
+    it,
+    `Why, and what the keys do: ${MANAGED_DOC}`,
+  ]
+}
+
 /** First time a request goes out without pii-mask's prompt.compose: say so, and send Claude the note on placeholders another way. */
 async function notePassedOver($: EngineInterface): Promise<void> {
   if (passedOver) return
   passedOver = true
+  howToFix = await fixSteps($).catch(() => [`See ${MANAGED_DOC}`])
   publishStatus($)
   try {
-    $.ui.toast(`${NAME} runs after Claude Code's security default on this setup, so it checks @-mentioned files, CLAUDE.md and ` +
-      `reminders before each request and holds one that would send personal data. To mask them instead: ${MANAGED_DOC}`)
+    $.ui.toast(`${NAME} can't mask @-mentioned files, CLAUDE.md and reminders on this setup: Claude Code's security default runs first. ` +
+      'It checks them instead and stops a request that would send personal data. /pii-mask fix shows how to put pii-mask first.')
   } catch {
     // no surface
   }
@@ -1700,7 +1771,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'pii-mask',
       description: 'Open the pane listing everything pii-mask has masked; "status" prints it, "media" switches image and PDF handling, "retry" restarts the model, "off" sends unmasked while it can\'t run.',
-      argumentHint: '[status|media [pdf|images|faces|image-text] [on|off]|retry|off|on|allow-unmasked [off]]',
+      argumentHint: '[status|media [pdf|images|faces|image-text] [on|off]|retry|off|on|fix|allow-unmasked [off]]',
     })
     publishStatus($)
     return next(e)
@@ -1725,6 +1796,14 @@ export const register: Register = on => {
       publishStatus($)
       return { text: own('pii-mask is off for this session: messages go to Claude unmasked until its model runs. /pii-mask on holds them again.') }
     }
+    if (arg === 'fix') {
+      const steps = await fixSteps($)
+      if (passedOver) howToFix = steps
+      const lead = passedOver ? []
+        : composeRan ? ['pii-mask masks everything in this session: nothing to fix here. For another computer, or if Claude Code says "pii-mask: its ... hook was skipped" when it starts:']
+        : ['No request has gone out yet in this session, so pii-mask can\'t tell yet. If Claude Code said "pii-mask: its ... hook was skipped" when it started, these steps fix it:']
+      return { text: own([...lead, ...steps].join('\n\n')) }
+    }
     if (arg === 'allow-unmasked' || arg === 'allow-unmasked off') {
       allowPassedOver = arg === 'allow-unmasked'
       publishStatus($)
@@ -1740,7 +1819,7 @@ export const register: Register = on => {
       return { text: own(engine.state === 'ready' ? 'pii-mask is on.' : 'pii-mask holds messages again until its model runs.') }
     }
     if (arg !== '' && arg !== 'status') {
-      return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, /pii-mask media, /pii-mask retry, /pii-mask off, or /pii-mask allow-unmasked.') }
+      return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, /pii-mask media, /pii-mask retry, /pii-mask off, /pii-mask fix, or /pii-mask allow-unmasked.') }
     }
     if (arg === '') {
       const opened = await $.ui.open({ id: PANE, title: 'Masked by pii-mask', focus: true })
@@ -1753,7 +1832,7 @@ export const register: Register = on => {
           `${NAME}: ${bypass()
             ? 'off for this session (/pii-mask off): messages go to Claude without masking. /pii-mask on holds them again.'
             : blocked() ?? (passedOver
-              ? `on, the local model is running. On this setup Claude Code's security default runs before pii-mask for @-mentioned files, CLAUDE.md, reminders and hook output: pii-mask checks them before each request and holds one where they hold personal data${allowPassedOver ? ' (allowed unmasked this session)' : ''}. To mask them instead: ${MANAGED_DOC}`
+              ? `on, the local model is running. On this setup Claude Code's security default runs before pii-mask for @-mentioned files, CLAUDE.md, reminders and hook output: pii-mask checks them before each request and holds one where they hold personal data${allowPassedOver ? ' (allowed unmasked this session)' : ''}. To have them masked: /pii-mask fix`
               : 'on, the local model is running.')}`,
           `Model: ${engine.state}${engine.detail ? ` (${engine.detail})` : ''}, GLiNER PII on ${BASE}`,
           `Model calls: ${nerStats.calls} (${nerStats.calls ? Math.round(nerStats.ms / nerStats.calls) : 0} ms on average), failed: ${nerStats.failures}`,
@@ -1773,6 +1852,19 @@ export const register: Register = on => {
     const view = await read($, engineAtom)
     const block = blocks.values().next().value
     const lines = engineLines(view, block)
+    if (lines.length === 0 && view.passedOver && !e.props.hasSurvey) {
+      const { Box, Button, Text } = $.ui.resolve(e)
+      return (
+        <Box flexDirection="column">
+          <Text bold color="warning">{"⚠ pii-mask can't mask @-mentioned files, CLAUDE.md and reminders here"}</Text>
+          <Text>{"Claude Code's security default runs first on this setup (a Team or Enterprise plan, or managed settings). pii-mask checks those parts instead and stops a request that would send personal data."}</Text>
+          <Box flexDirection="row" gap={2}>
+            <Button key="fix" label="How to fix" onPress={() => { void $.ui.open({ id: PANE, title: 'Masked by pii-mask', focus: true }) }} />
+            <Button key="dismiss" label="Dismiss" onPress={() => { passedOverDismissed = true; showEngine($) }} />
+          </Box>
+        </Box>
+      )
+    }
     if (lines.length === 0 || e.props.hasSurvey) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
@@ -1810,6 +1902,12 @@ export const register: Register = on => {
             : `${entries.length} value${entries.length === 1 ? '' : 's'} masked. Claude sees the placeholder; the real value stays on this machine.`}
         </Text>
         <Text dimColor wrap="truncate-end">{`Images and PDFs: ${mediaLine} (/pii-mask media)`}</Text>
+        {passedOver && howToFix && (
+          <Box flexDirection="column">
+            <Text bold color="warning">{"How to have @-mentioned files, CLAUDE.md and reminders masked too"}</Text>
+            {howToFix.map(l => <Text>{l}</Text>)}
+          </Box>
+        )}
         {shown.map(l =>
           l.kind === 'head' ? (
             <Text bold color="claude">{l.text}</Text>

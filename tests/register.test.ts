@@ -56,6 +56,8 @@ type World = {
   jobs?: boolean
   /** How many starts it takes before the server runs (an old one still holds the port). */
   startsNeeded?: number
+  /** A Mac (its system folder is there). */
+  mac?: boolean
   /** The request's messages in API form: what Claude Code added past pii-mask (sec-default passes it over). */
   apiRows?: { role: 'user' | 'assistant'; content: { type: string; [k: string]: unknown }[] }[]
   /** Something else answers on the port: another program, or another user's pii-mask (it can't prove the key). */
@@ -76,7 +78,7 @@ const FINDS: Record<string, string> = {
 function world(on: On, w: World = {}) {
   const clock = mock.clock(on)
   const cache = w.windows ? WIN_CACHE : CACHE
-  const files: Record<string, string> = { ...(w.installed === false ? {} : { [`${cache}/installed.json`]: '{}', [`${cache}/token`]: KEY }), ...w.files }
+  const files: Record<string, string> = { ...(w.installed === false ? {} : { [`${cache}/installed.json`]: '{}', [`${cache}/token`]: KEY }), ...(w.mac ? { '/System/Library/CoreServices': '' } : {}), ...w.files }
   const seen = { jobPolls: 0, stopped: 0, mentioned: '', read: '', mediaAdded: false, appended: [] as unknown[], mediaCalls: [] as { kind: string; body: Record<string, unknown> }[], answer: '', status: [] as string[], requestSent: false, ran: '', writes: {} as Record<string, string>, runs: [] as string[][], spawns: [] as string[][], detects: 0, keys: [] as string[], sentToForeign: 0, cancelled: 0 }
   let up = w.up !== false
   let serverVersion = w.serverVersion
@@ -504,7 +506,7 @@ describe('the local model\'s life cycle', () => {
   })
 
   describe('passed over by Claude Code\'s security default (Team, Enterprise, managed settings)', () => {
-    const step = ($: Parameters<Parameters<typeof test>[1]>[0]) => collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+    const step = ($: Parameters<typeof appendPrompt>[0]) => collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
 
     test('an @-mentioned file with personal data that reached Claude Code past pii-mask: the request is held, with the fix', async ($, on) => {
       const { seen } = world(on, { apiRows: [{ role: 'user', content: [{ type: 'text', text: '<system-reminder>Contents of notes.md: call Lars Holm at lars@holm.dk</system-reminder>' }] }] })
@@ -539,6 +541,43 @@ describe('the local model\'s life cycle', () => {
       expect(text).toContain('unchecked')
       await step($)
       expect(seen.requestSent).toBe(true)
+    })
+
+    const MAC = '/Library/Application Support/ClaudeCode/managed-settings.json'
+    const fix = async ($: Parameters<typeof appendPrompt>[0], _on?: unknown) => {
+      await appendPrompt($, 'hello')
+      await step($)
+      return ((await $.command.run({ command: 'pii-mask', args: 'fix' } as never)) as { text: string }).text
+    }
+
+    test('/pii-mask fix on a Mac with no managed settings: one command that creates the file with the three keys', async ($, on) => {
+      world(on, { mac: true })
+      const text = await fix($, on)
+      expect(text).toContain(`sudo tee "${MAC}"`)
+      expect(text).toContain('"prependPlugins": [\n    "pii-mask@pii-mask",\n    "sec-default@builtin"\n  ]')
+      expect(text).toContain('"repo": "majidkabir/pii-mask"')
+      expect(text).toContain('Restart Claude Code')
+    })
+
+    test('/pii-mask fix keeps what managed settings hold, and an organization\'s own list, with pii-mask first', async ($, on) => {
+      world(on, { mac: true, files: { [MAC]: JSON.stringify({ permissions: { deny: ['WebFetch'] }, prependPlugins: ['acme-guard@acme'] }) } })
+      const text = await fix($, on)
+      expect(text).toContain('what it holds now is kept')
+      expect(text).toContain('"WebFetch"')
+      expect(text).toContain('"prependPlugins": [\n    "pii-mask@pii-mask",\n    "acme-guard@acme"\n  ]')
+    })
+
+    test('/pii-mask fix when the settings already put pii-mask first: restart, then how to check', async ($, on) => {
+      const done = { extraKnownMarketplaces: { 'pii-mask': { source: { source: 'github', repo: 'majidkabir/pii-mask' } } }, enabledPlugins: { 'pii-mask@pii-mask': true }, prependPlugins: ['pii-mask@pii-mask', 'sec-default@builtin'] }
+      world(on, { files: { '/etc/claude-code/managed-settings.json': JSON.stringify(done) } })
+      const text = await fix($, on)
+      expect(text).toContain('already put pii-mask first')
+      expect(text).toContain('tier prepend')
+    })
+
+    test('/pii-mask fix on Windows: a PowerShell command', async ($, on) => {
+      world(on, { windows: true })
+      expect(await fix($, on)).toContain('Set-Content -Path "C:\\Program Files\\ClaudeCode\\managed-settings.json"')
     })
 
     test('with pii-mask seated first (its prompt.compose runs), nothing is held for it', async ($, on) => {
