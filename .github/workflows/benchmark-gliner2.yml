@@ -55,7 +55,8 @@ jobs:
         run: |
           mkdir -p "$PII_MASK_CACHE"
           nohup "$RUNNER_TEMP/srv/bin/python" server/server.py --cache "$PII_MASK_CACHE" --port 8766 --model ${{ matrix.model }} --idle 20000 > "$RUNNER_TEMP/server.log" 2>&1 &
-          for i in $(seq 1 120); do curl -sf http://127.0.0.1:8766/health > /dev/null && break; sleep 5; done
+          pid=$!
+          for i in $(seq 1 120); do curl -sf http://127.0.0.1:8766/health > /dev/null && break; kill -0 $pid 2>/dev/null || { tail -30 "$RUNNER_TEMP/server.log"; exit 1; }; sleep 5; done
           curl -s http://127.0.0.1:8766/health; echo
       - name: Nordic and European check
         working-directory: tools/benchmark

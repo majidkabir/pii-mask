@@ -172,9 +172,11 @@ class Gliner2:
         os.environ.setdefault("HF_HOME", os.path.join(cache, "hf"))
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         from gliner2 import GLiNER2
+        from huggingface_hub import snapshot_download
 
         self.name = self.NAME
-        self.model = GLiNER2.from_pretrained(self.NAME, revision=self.REVISION)
+        # The files at that commit, as a folder: its tokenizer is then read from there too.
+        self.model = GLiNER2.from_pretrained(snapshot_download(self.NAME, revision=self.REVISION, local_files_only=True))
 
     def predict(self, chunks, labels, threshold):
         asked = {}
