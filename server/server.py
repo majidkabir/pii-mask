@@ -162,7 +162,7 @@ class Gliner2:
     NAME = "fastino/gliner2-privacy-filter-PII-multi"
     REVISION = "1cb4166094dc58fa8d836429f060d6c95f62b495"
     LABELS = {
-        "person": "person", "email": "email", "phone number": "phone_number", "address": "address",
+        "person": "person", "email": "email", "phone number": "phone_number", "address": ["address", "street_address"],
         "iban": "iban", "bank account number": "bank_account", "credit card number": "card_number",
         "social security number": "national_id_number", "national id number": "national_id_number",
         "passport number": "passport_number", "date of birth": "date_of_birth", "ip address": "ip_address",
@@ -181,7 +181,9 @@ class Gliner2:
     def predict(self, chunks, labels, threshold):
         asked = {}
         for label in labels:
-            asked.setdefault(self.LABELS.get(label, label), label)
+            theirs = self.LABELS.get(label, label)
+            for t in theirs if isinstance(theirs, list) else [theirs]:
+                asked.setdefault(t, label)
         out = self.model.batch_extract_entities(chunks, list(asked), threshold=threshold,
                                                 include_confidence=True, include_spans=True)
         results = []

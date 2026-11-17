@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        model: [gliner, gliner2]
+        model: [gliner2]  # the current model's numbers: run 44023892701
     steps:
       - name: Folders
         run: |
