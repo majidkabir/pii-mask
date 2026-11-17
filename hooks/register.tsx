@@ -136,6 +136,10 @@ function statusLine(): string {
   // Claude Code puts the plugin's name in front of its status, so it isn't repeated here.
   if (blocks.size) return '🔒 BLOCKED'
   if (bypass()) return '⚠ off for this session: messages go to Claude unmasked (/pii-mask on)'
+  if (passedOver && engine.state === 'ready') {
+    return allowPassedOver ? '⚠ on, but attachments and CLAUDE.md go unmasked this session (/pii-mask allow-unmasked off)'
+      : '🔒 on; attachments and CLAUDE.md are checked, not masked (/pii-mask status)'
+  }
   switch (engine.state) {
     case 'ready': return '🔒 on'
     case 'installing': return `⏳ installing its model (${engine.detail || 'first run'})`
@@ -895,6 +899,137 @@ function redactContent(content: readonly Block[]): Block[] {
     .map(b => (b.type === 'text' ? { ...b, text: UNCHECKED_NOTE } : b.type === 'tool_result' ? { ...b, content: UNCHECKED_NOTE } : b))
 }
 
+/* --------------------------- passed over by Claude Code's security default */
+
+/**
+ * On Team and Enterprise plans and on machines with managed settings, Claude
+ * Code's built-in security default (`sec-default`) sits first and passes a mod a
+ * person installed over for prompt content: CLAUDE.md and the system prompt
+ * (prompt.context, prompt.compose), @-mentioned files (prompt.attachment), and
+ * the rows Claude Code adds itself (session.append of attachments, hook output
+ * and compactions). Prompts and tool results still pass pii-mask. Listed in
+ * managed settings' `prependPlugins`, pii-mask sits before it and sees all of it
+ * (docs/managed-settings.md).
+ *
+ * pii-mask notices it when a request goes out without its prompt.compose having
+ * run. Before each request it then checks what it couldn't mask: the texts in
+ * the conversation it didn't store itself, and the CLAUDE.md files; a request
+ * where one holds personal data is held, with how to fix it.
+ */
+let composeRan = false
+let passedOver = false
+/** `/pii-mask allow-unmasked`: this session sends what pii-mask couldn't mask. */
+let allowPassedOver = false
+/** Every text pii-mask stored this session, so the texts Claude Code added past it are told apart. */
+const storedTexts = new Set<string>()
+/** Texts checked and found to hold no personal data. */
+const cleanTexts = new Set<string>()
+const MANAGED_DOC = 'https://github.com/majidkabir/pii-mask/blob/main/docs/managed-settings.md'
+
+function rememberStored(content: readonly Block[]): void {
+  for (const t of textsOf(content)) storedTexts.add(t)
+}
+
+/** The kinds of personal data in `texts` (`PERSON`, `EMAIL`...), checked the way a row would be; none: []. */
+async function kindsIn($: EngineInterface, texts: readonly string[]): Promise<string[]> {
+  const fresh = [...new Set(texts)].filter(t => t.trim() && !storedTexts.has(t) && !cleanTexts.has(t))
+  if (!fresh.length) return []
+  const checked = fresh.map(accountContextOut)
+  const rules = await rulesFor($, checked)
+  const scratch = new Vault(vault.marker) // the check alone: nothing is added to the session's values
+  const kinds = new Set<string>()
+  for (const [i, t] of fresh.entries()) {
+    const masked = mask(checked[i]!, rules, scratch)
+    if (masked === checked[i]) {
+      cleanTexts.add(t)
+      continue
+    }
+    if (masked === t) {
+      cleanTexts.add(t)
+      continue
+    }
+    const before = new Set(checked[i]!.match(/<<[A-Z_]+_\d+[^>]*>>/g) ?? [])
+    for (const m of masked.matchAll(/<<([A-Z_]+?)_\d+[^>]*>>/g)) if (!before.has(m[0])) kinds.add(m[1] ?? '')
+  }
+  return [...kinds].filter(Boolean)
+}
+
+/**
+ * A text without what Claude Code adds of the account itself, which Anthropic
+ * holds already: the signed-in account's email in a session's context ("# userEmail"
+ * and its line), and Anthropic's no-reply address in commit attribution.
+ */
+function accountContextOut(text: string): string {
+  return text
+    .replace(/# userEmail\s*\n[^\n]*/g, '# userEmail')
+    .replace(/[\w.+-]+@anthropic\.com\b/gi, '')
+}
+
+/** The CLAUDE.md files Claude Code reads for this folder: in it and each folder above, and the user's own. */
+async function claudeMdFiles($: EngineInterface): Promise<{ path: string; text: string }[]> {
+  const out: { path: string; text: string }[] = []
+  const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''
+  const paths: string[] = []
+  let dir = (await $.session.cwd()).replace(/[\\/]+$/, '')
+  for (let i = 0; i < 12 && dir; i++) {
+    paths.push(`${dir}/CLAUDE.md`, `${dir}/CLAUDE.local.md`, `${dir}/.claude/CLAUDE.md`)
+    const up = dir.replace(/[\\/][^\\/]*$/, '')
+    if (up === dir) break
+    dir = up
+  }
+  if (home) paths.push(`${home}/.claude/CLAUDE.md`)
+  for (const path of [...new Set(paths)]) {
+    try {
+      out.push({ path, text: await $.fs.read(path) })
+    } catch {
+      // not there
+    }
+  }
+  return out
+}
+
+/**
+ * Why this request is held, when pii-mask is passed over and something it
+ * couldn't mask holds personal data; undefined when nothing does.
+ */
+async function passedOverHold($: EngineInterface, agentId: string | undefined): Promise<string | undefined> {
+  const fix = `To fix it, list pii-mask in your managed settings (${MANAGED_DOC}). ` +
+    'Until then, remove it (/rewind, or edit the file), or send it unmasked for this session with /pii-mask allow-unmasked.'
+  const why = (what: string, kinds: readonly string[]) =>
+    `${what} holds personal data (${kinds.join(', ')}) that pii-mask can't mask here: on this setup Claude Code's ` +
+    `security default runs before pii-mask for it (Team and Enterprise plans, machines with managed settings). ${fix}`
+  for (const f of await claudeMdFiles($)) {
+    const kinds = await kindsIn($, [f.text])
+    if (kinds.length) return why(f.path, kinds)
+  }
+  const api = await $.session.messages(agentId === undefined ? { as: 'api' } : { as: 'api', agentId })
+  if ('deny' in api) return undefined
+  const texts: string[] = []
+  for (const m of api) {
+    if (m.role !== 'user') continue
+    for (const b of m.content as Block[]) {
+      if (b.type === 'text' && typeof b.text === 'string') texts.push(b.text)
+      // pii-mask's own rows hold no image or PDF of their own (a covered copy is inside a tool result).
+      else if (isMedia(b)) return `An image or PDF Claude Code attached couldn't be checked by pii-mask: on this setup Claude Code's security default runs before pii-mask for it. ${fix}`
+    }
+  }
+  const kinds = await kindsIn($, texts)
+  return kinds.length ? why('Text Claude Code added to the conversation (an @-mentioned file, a reminder or a hook\'s output)', kinds) : undefined
+}
+
+/** First time a request goes out without pii-mask's prompt.compose: say so, and send Claude the note on placeholders another way. */
+async function notePassedOver($: EngineInterface): Promise<void> {
+  if (passedOver) return
+  passedOver = true
+  publishStatus($)
+  try {
+    $.ui.toast(`${NAME} runs after Claude Code's security default on this setup, so it checks @-mentioned files, CLAUDE.md and ` +
+      `reminders before each request and holds one that would send personal data. To mask them instead: ${MANAGED_DOC}`)
+  } catch {
+    // no surface
+  }
+}
+
 /* ------------------------------------------------------------ images, PDFs */
 
 /**
@@ -1322,13 +1457,15 @@ export const register: Register = on => {
       : web ? await rulesFor($, texts).catch(() => known())
       : await rulesFor($, texts)
     const content = maskContent(prepared, rules)
+    rememberStored(content)
     await persist($, before)
     return next({ ...e, message: { ...e.message, content } })
-  }).catch(($, e, next) =>
-    next.called ? next(e)
-    : bypass() ? next(e) // /pii-mask off while this row waited for the model
-    : next({ ...e, message: { ...e.message, content: redactContent(e.message.content) } }),
-  )
+  }).catch(($, e, next) => {
+    if (next.called || bypass()) return next(e) // bypass: /pii-mask off while this row waited for the model
+    const content = redactContent(e.message.content)
+    rememberStored(content)
+    return next({ ...e, message: { ...e.message, content } })
+  })
 
   // The session title: set from the masked prompt, so the raw prompt is never sent to title it.
   on('classic.UserPromptSubmit', async ($, e, next) => {
@@ -1354,7 +1491,17 @@ export const register: Register = on => {
         // reported below
       }
     }
-    const reason = blocked()
+    let reason = blocked()
+    if (reason === undefined && engine.state === 'ready' && !composeRan && !bypass()) {
+      await notePassedOver($)
+      if (!allowPassedOver) {
+        try {
+          reason = await passedOverHold($, e.agentId)
+        } catch (err) {
+          reason = `pii-mask couldn't check what Claude Code added past it: ${(err as Error).message}`
+        }
+      }
+    }
     if (reason !== undefined) {
       const text = own(`${NAME} stopped this request, so no personal data could leak. ${reason}`)
       yield { kind: 'text', index: 0, text }
@@ -1447,7 +1594,17 @@ export const register: Register = on => {
   )
 
   // The system prompt: mask the per-session sections and explain the placeholders.
+  // The note on placeholders goes in the system prompt (prompt.compose). Until that
+  // hook has run in this session, as where Claude Code's security default passes
+  // pii-mask over, it goes beside the prompt instead: so on the first prompt of a
+  // session it may go twice, which costs a few hundred characters once.
+  on('prompt.submit', async ($, e, next) => {
+    if (composeRan || bypass()) return next(e)
+    return next({ ...e, context: [...(e.context ?? []), own(systemNote(vault))] })
+  })
+
   on('prompt.compose', async ($, e, next) => {
+    composeRan = true
     await ready($)
     if (bypass()) return next(e) // /pii-mask off: sent as it is
     const before = vault.size
@@ -1543,7 +1700,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'pii-mask',
       description: 'Open the pane listing everything pii-mask has masked; "status" prints it, "media" switches image and PDF handling, "retry" restarts the model, "off" sends unmasked while it can\'t run.',
-      argumentHint: '[status|media [pdf|images|faces|image-text] [on|off]|retry|off|on]',
+      argumentHint: '[status|media [pdf|images|faces|image-text] [on|off]|retry|off|on|allow-unmasked [off]]',
     })
     publishStatus($)
     return next(e)
@@ -1568,13 +1725,22 @@ export const register: Register = on => {
       publishStatus($)
       return { text: own('pii-mask is off for this session: messages go to Claude unmasked until its model runs. /pii-mask on holds them again.') }
     }
+    if (arg === 'allow-unmasked' || arg === 'allow-unmasked off') {
+      allowPassedOver = arg === 'allow-unmasked'
+      publishStatus($)
+      return { text: own(!passedOver
+        ? 'pii-mask masks everything in this session: there is nothing to allow.'
+        : allowPassedOver
+          ? 'For this session, what pii-mask can\'t mask here (attachments, CLAUDE.md, reminders) goes to Claude unchecked. /pii-mask allow-unmasked off holds it again.'
+          : 'pii-mask holds a request again when what it can\'t mask holds personal data.') }
+    }
     if (arg === 'on') {
       letThrough = false
       publishStatus($)
       return { text: own(engine.state === 'ready' ? 'pii-mask is on.' : 'pii-mask holds messages again until its model runs.') }
     }
     if (arg !== '' && arg !== 'status') {
-      return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, /pii-mask media, /pii-mask retry, or /pii-mask off.') }
+      return { text: own('Unknown option. Use /pii-mask to open the pane, /pii-mask status, /pii-mask media, /pii-mask retry, /pii-mask off, or /pii-mask allow-unmasked.') }
     }
     if (arg === '') {
       const opened = await $.ui.open({ id: PANE, title: 'Masked by pii-mask', focus: true })
@@ -1586,7 +1752,9 @@ export const register: Register = on => {
         [
           `${NAME}: ${bypass()
             ? 'off for this session (/pii-mask off): messages go to Claude without masking. /pii-mask on holds them again.'
-            : blocked() ?? 'on, the local model is running.'}`,
+            : blocked() ?? (passedOver
+              ? `on, the local model is running. On this setup Claude Code's security default runs before pii-mask for @-mentioned files, CLAUDE.md, reminders and hook output: pii-mask checks them before each request and holds one where they hold personal data${allowPassedOver ? ' (allowed unmasked this session)' : ''}. To mask them instead: ${MANAGED_DOC}`
+              : 'on, the local model is running.')}`,
           `Model: ${engine.state}${engine.detail ? ` (${engine.detail})` : ''}, GLiNER PII on ${BASE}`,
           `Model calls: ${nerStats.calls} (${nerStats.calls ? Math.round(nerStats.ms / nerStats.calls) : 0} ms on average), failed: ${nerStats.failures}`,
           `Values masked: ${vault.size} (open /pii-mask to see them) · rows removed unchecked: ${rowsRemoved} · images/PDFs removed: ${mediaDropped}`,

@@ -56,6 +56,8 @@ type World = {
   jobs?: boolean
   /** How many starts it takes before the server runs (an old one still holds the port). */
   startsNeeded?: number
+  /** The request's messages in API form: what Claude Code added past pii-mask (sec-default passes it over). */
+  apiRows?: { role: 'user' | 'assistant'; content: { type: string; [k: string]: unknown }[] }[]
   /** Something else answers on the port: another program, or another user's pii-mask (it can't prove the key). */
   foreign?: 'other-app' | 'wrong-key'
 }
@@ -87,7 +89,8 @@ function world(on: On, w: World = {}) {
   const eol = (text: string) => (w.windows ? text.replace(/\n/g, '\r\n') : text)
   on('session.cwd', () => ({ value: '/proj' }))
   on('session.version', () => ({ value: { version: w.version ?? '2.1.302' } }))
-  on('session.messages', () => ({ value: [] }))
+  // The request as Claude Code would send it: what pii-mask stored, and what reached it past pii-mask (apiRows).
+  on('session.messages', (_$, e) => ({ value: (e as { as?: string }).as === 'api' ? (w.apiRows ?? []) : [] }))
   on('ui.status', ($, e) => {
     seen.status.push(String((e as { text?: unknown }).text ?? ''))
     return { value: undefined }
@@ -498,6 +501,53 @@ describe('the local model\'s life cycle', () => {
     expect(newerVersion('0.7.2', '0.7.2')).toBe(false)
     expect(newerVersion('0.7.2', '0.8.0')).toBe(false)
     expect(newerVersion('1.0.0', '0.9.9')).toBe(true)
+  })
+
+  describe('passed over by Claude Code\'s security default (Team, Enterprise, managed settings)', () => {
+    const step = ($: Parameters<Parameters<typeof test>[1]>[0]) => collect($.turn.step({ turnId: 't', index: 0, model: 'claude', messageCount: 1 }))
+
+    test('an @-mentioned file with personal data that reached Claude Code past pii-mask: the request is held, with the fix', async ($, on) => {
+      const { seen } = world(on, { apiRows: [{ role: 'user', content: [{ type: 'text', text: '<system-reminder>Contents of notes.md: call Lars Holm at lars@holm.dk</system-reminder>' }] }] })
+      await appendPrompt($, 'Summarise my notes')
+      const chunks = await step($)
+      expect(seen.requestSent).toBe(false)
+      expect(textOf(chunks)).toContain('managed settings')
+      expect(textOf(chunks)).toContain('EMAIL')
+      expect(textOf(chunks)).not.toContain('Lars')
+      expect(seen.status.at(-1)).toContain('checked, not masked')
+    })
+
+    test('what pii-mask stored itself, and added text with nothing personal, goes', async ($, on) => {
+      const apiRows: NonNullable<World['apiRows']> = []
+      const { seen } = world(on, { apiRows })
+      const stored = await appendPrompt($, 'Write to Lars Holm')
+      apiRows.push({ role: 'user', content: [...(stored.message?.content as { type: string }[]),
+        { type: 'text', text: '<system-reminder>The user opened src/OrderService.java in the IDE.</system-reminder>' },
+        // Claude Code's own: the signed-in account (Anthropic holds it) and its commit attribution.
+        { type: 'text', text: "<system-reminder>\n# userEmail\nThe user's email address is lars@holm.dk. Use it only to identify the user.\n</system-reminder>" },
+        { type: 'text', text: 'End commit messages with: Co-Authored-By: Claude <noreply@anthropic.com>' }] })
+      await step($)
+      expect(seen.requestSent).toBe(true)
+    })
+
+    test('a CLAUDE.md with personal data is held too; /pii-mask allow-unmasked lets it through for the session', async ($, on) => {
+      const { seen } = world(on, { files: { '/proj/CLAUDE.md': 'Owner: Lars Holm, lars@holm.dk' } })
+      await appendPrompt($, 'hello')
+      expect(textOf(await step($))).toContain('/proj/CLAUDE.md')
+      expect(seen.requestSent).toBe(false)
+      const { text } = await $.command.run({ command: 'pii-mask', args: 'allow-unmasked' } as never) as { text: string }
+      expect(text).toContain('unchecked')
+      await step($)
+      expect(seen.requestSent).toBe(true)
+    })
+
+    test('with pii-mask seated first (its prompt.compose runs), nothing is held for it', async ($, on) => {
+      const { seen } = world(on, { files: { '/proj/CLAUDE.md': 'Owner: Lars Holm, lars@holm.dk' } })
+      await appendPrompt($, 'hello')
+      await $.prompt.compose(COMPOSE)
+      await step($)
+      expect(seen.requestSent).toBe(true)
+    })
   })
 
   test('every request to the server carries its key, read from the cache folder', async ($, on) => {
