@@ -106,3 +106,20 @@ Found in a real run on a Downloads folder (receipts, holiday photos, a screensho
 Found in a review (0.7.16): dates OCR read without their dots ("14 07 1991") were left after 0.7.15 even next to "Date of birth"; they are masked again, in text after a birth-date label and in any image that names a date of birth.
 
 Faces: pii-mask pixelates faces found by OpenCV's YuNet into 7 blocks across, however large the face is (before 0.7.16 the mosaic had a block per 24 pixels, so a face filling a selfie stayed recognisable). YuNet's authors report 0.884 / 0.866 / 0.750 AP (easy / medium / hard) on the WIDER FACE validation set ([OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)); WIDER FACE couldn't be downloaded here to measure it again. A face filling a 1,400-pixel photo is still found.
+
+## 6. Another model: GLiNER2-PII (November 2026)
+
+[GLiNER2-PII](https://huggingface.co/fastino/gliner2-privacy-filter-PII-multi) (Fastino, May 2026, Apache-2.0, 7 languages) reports a higher F1 than pii-mask's model on the SPY benchmark (0.477 against 0.398). It was run here through pii-mask's own masking, on GitHub's Ubuntu machines, each model on its own runner, asked for the same kinds (its `street_address` added to `address`). The Nordic check is `tools/benchmark/nordic.py`: 21 invented sentences in Danish, Swedish, Norwegian, Finnish, German, Dutch and English, 43 values, the model's finds alone.
+
+| | pii-mask's model | GLiNER2-PII |
+| --- | --- | --- |
+| TAB entity recall, direct / quasi | 0.474 / 0.210 | 0.484 / 0.316 |
+| TAB mention precision | 0.850 | 0.865 |
+| Presidio set precision / recall / F2 | **0.807** / 0.545 / 0.583 | 0.749 / 0.566 / 0.595 |
+| People / street addresses / phones / cards hidden | 0.90 / 0.58 / 0.78 / 0.97 | 0.91 / 0.64 / 0.81 / 1.00 |
+| Dates hidden (pii-mask leaves plain dates) | 0.29 | 0.64 |
+| Nordic check, found | 42 of 43 (an IP address, which a pattern catches) | 43 of 43 |
+| Speed, memory | ~1,900 chars/s, 2.9 GB | about the same, 3.0 GB |
+
+GLiNER2-PII finds a little more, masks more that isn't personal data on Presidio's set, and masks dates, which pii-mask keeps (a receipt's date). Its weights are safetensors, which can't run code when loaded. pii-mask keeps its model for now: the gain is small, and switching would need a date filter and its own precision work.
+
