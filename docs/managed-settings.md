@@ -17,7 +17,7 @@ Your prompts and tool results (files Claude reads, command output) are still mas
 | CLAUDE.md and the system prompt | `prompt.context`, `prompt.compose` |
 | Reminders and hook output Claude Code adds | `session.append` (attachments, hook output) |
 
-Since 0.7.18 pii-mask notices this at the first request, shows a note above the prompt, and checks those parts before each request. A request where they hold personal data is stopped, and you're told which file and what kind of data. The status line says `on; attachments and CLAUDE.md are checked, not masked`. You can then remove it (`/rewind`, or edit the file), or send it unmasked for the session with `/pii-mask allow-unmasked`.
+Since 0.7.18 pii-mask notices this at the first request and checks those parts before each request; since 0.7.19 it also shows a note above the prompt, and `/pii-mask fix` gives the steps. A request where they hold personal data is stopped, and you're told which file and what kind of data. The status line says `on; attachments and CLAUDE.md are checked, not masked`. You can then remove it (`/rewind`, or edit the file), or send it unmasked for the session with `/pii-mask allow-unmasked`.
 
 To have them masked instead, list pii-mask in managed settings, as below. It then runs before the security default and sees everything.
 
