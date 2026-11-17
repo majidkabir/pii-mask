@@ -1,0 +1,102 @@
+name: benchmark GLiNER2-PII (branch only)
+
+# Runs pii-mask's text benchmarks (TAB, Presidio's synth set), a small Nordic and
+# European check, and the speed test with the current model and with
+# fastino/gliner2-privacy-filter-PII-multi, each on its own runner. Results are
+# job annotations (notices) and the job summary.
+on:
+  push:
+    branches: ['benchmark-gliner2']
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [gliner, gliner2]
+    env:
+      HF_HOME: ${{ runner.temp }}/hf
+      PII_MASK_CACHE: ${{ runner.temp }}/pii
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: oven-sh/setup-bun@v2
+      - name: Model server environment
+        run: |
+          python -m venv "$RUNNER_TEMP/srv"
+          "$RUNNER_TEMP/srv/bin/pip" install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          "$RUNNER_TEMP/srv/bin/pip" install --quiet "gliner>=0.2.16,<0.3" "gliner2[local]==2.1.0" huggingface_hub
+      - name: Scorer environment and data
+        working-directory: tools/benchmark
+        run: |
+          python -m venv venv
+          venv/bin/pip install --quiet presidio-analyzer presidio-evaluator spacy intervaltree
+          for m in lg md sm; do venv/bin/pip install --quiet "https://github.com/explosion/spacy-models/releases/download/en_core_web_$m-3.8.0/en_core_web_$m-3.8.0-py3-none-any.whl"; done
+          git clone --quiet --depth 1 https://github.com/NorskRegnesentral/text-anonymization-benchmark data/tab
+          git clone --quiet --depth 1 https://github.com/microsoft/presidio-research data/presidio-research
+          python3 -c "import json; [print(json.dumps({'id': d['doc_id'], 'text': d['text']})) for d in json.load(open('data/tab/echr_test.json'))]" > tab_in.jsonl
+          python3 -c "import json; [print(json.dumps({'id': str(i), 'text': r['full_text']})) for i, r in enumerate(json.load(open('data/presidio-research/data/synth_dataset_v2.json')))]" > synth_in.jsonl
+      - name: Download the model
+        run: |
+          "$RUNNER_TEMP/srv/bin/python" -c "
+          from huggingface_hub import snapshot_download
+          if '${{ matrix.model }}' == 'gliner2':
+              snapshot_download('fastino/gliner2-privacy-filter-PII-multi', revision='1cb4166094dc58fa8d836429f060d6c95f62b495')
+          else:
+              snapshot_download('urchade/gliner_multi_pii-v1', revision='1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d')
+              from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_multi_pii-v1')
+          "
+      - name: Start the model server
+        run: |
+          mkdir -p "$PII_MASK_CACHE"
+          nohup "$RUNNER_TEMP/srv/bin/python" server/server.py --cache "$PII_MASK_CACHE" --port 8766 --model ${{ matrix.model }} --idle 20000 > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 120); do curl -sf http://127.0.0.1:8766/health > /dev/null && break; sleep 5; done
+          curl -s http://127.0.0.1:8766/health; echo
+      - name: Nordic and European check
+        working-directory: tools/benchmark
+        run: |
+          "$RUNNER_TEMP/srv/bin/python" nordic.py --cache "$PII_MASK_CACHE" --json nordic.json
+          python3 -c "
+          import json; d=json.load(open('nordic.json'))
+          print('::notice title=${{ matrix.model }} nordic::recall', d['recall'], 'precision', d['precision'], json.dumps(d['by_language']).replace(',', ';'))
+          print('::notice title=${{ matrix.model }} nordic missed::' + ' | '.join(d['missed'])[:900])
+          print('::notice title=${{ matrix.model }} nordic not personal::' + ' | '.join(d['not_personal'])[:900])
+          "
+      - name: TAB
+        working-directory: tools/benchmark
+        run: |
+          start=$(date +%s)
+          bun run.ts tab_in.jsonl tab_out.jsonl
+          secs=$(( $(date +%s) - start ))
+          python3 -c "import json; print(json.dumps({r['id']: [[s, e] for s, e, _ in r['spans']] for r in map(json.loads, open('tab_out.jsonl'))}))" > tab_out.json
+          venv/bin/python tab_score.py data/tab/echr_test.json tab_out.json | tee tab_score.txt
+          python3 -c "
+          import json,re; t=open('tab_score.txt').read(); d=json.loads(t[t.index('{'):])
+          print('::notice title=${{ matrix.model }} TAB ($secs s)::' + json.dumps(d).replace(',', ';')[:900])
+          "
+      - name: Presidio synth set
+        working-directory: tools/benchmark
+        run: |
+          start=$(date +%s)
+          bun run.ts synth_in.jsonl synth_out.jsonl
+          secs=$(( $(date +%s) - start ))
+          venv/bin/python eval_presidio.py synth_out.jsonl data/presidio-research/data/synth_dataset_v2.json > /dev/null
+          python3 -c "
+          import json; d=json.load(open('presidio_results.json'))
+          print('::notice title=${{ matrix.model }} synth ($secs s)::' + json.dumps(d['pii-mask']).replace(',', ';')[:900])
+          print('::notice title=${{ matrix.model }} synth by kind::' + json.dumps(d['hidden_by_type']['pii-mask']).replace(',', ';')[:900])
+          "
+      - name: Speed and memory
+        run: |
+          "$RUNNER_TEMP/srv/bin/python" tools/benchmark/perf.py --cache "$PII_MASK_CACHE" --no-media --json perf.json
+          python3 -c "
+          import json; d=json.load(open('perf.json'))
+          print('::notice title=${{ matrix.model }} perf::' + json.dumps(d).replace(',', ';')[:900])
+          "
+      - name: Server log
+        if: always()
+        run: tail -40 "$RUNNER_TEMP/server.log"

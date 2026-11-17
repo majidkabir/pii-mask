@@ -155,6 +155,45 @@ class Gliner:
         return [self.model.predict_entities(c, labels, threshold=threshold) for c in chunks]
 
 
+class Gliner2:
+    """Benchmark only (--model gliner2): Fastino's GLiNER2-PII. The mod's labels
+    are asked as the model's own and its finds given back under the mod's."""
+
+    NAME = "fastino/gliner2-privacy-filter-PII-multi"
+    REVISION = "1cb4166094dc58fa8d836429f060d6c95f62b495"
+    LABELS = {
+        "person": "person", "email": "email", "phone number": "phone_number", "address": "address",
+        "iban": "iban", "bank account number": "bank_account", "credit card number": "card_number",
+        "social security number": "national_id_number", "national id number": "national_id_number",
+        "passport number": "passport_number", "date of birth": "date_of_birth", "ip address": "ip_address",
+    }
+
+    def __init__(self, cache):
+        os.environ.setdefault("HF_HOME", os.path.join(cache, "hf"))
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        from gliner2 import GLiNER2
+
+        self.name = self.NAME
+        self.model = GLiNER2.from_pretrained(self.NAME, revision=self.REVISION)
+
+    def predict(self, chunks, labels, threshold):
+        asked = {}
+        for label in labels:
+            asked.setdefault(self.LABELS.get(label, label), label)
+        out = self.model.batch_extract_entities(chunks, list(asked), threshold=threshold,
+                                                include_confidence=True, include_spans=True)
+        results = []
+        for chunk, r in zip(chunks, out):
+            found = []
+            for theirs, spans in (r.get("entities") or {}).items():
+                for sp in spans:
+                    if isinstance(sp, dict) and "start" in sp:
+                        found.append({"text": chunk[sp["start"]:sp["end"]], "label": asked.get(theirs, theirs),
+                                      "start": sp["start"], "end": sp["end"], "score": float(sp.get("confidence", 1.0))})
+            results.append(found)
+        return results
+
+
 class Fake:
     """Tests only: a few fixed rules standing in for the model, so the mod and
     the server can be tested where the real model can't be downloaded."""
@@ -575,6 +614,7 @@ def main():
     p.add_argument("--idle", type=int, default=1800, help="seconds without requests before it stops (default 1800)")
     p.add_argument("--daemon", action="store_true", help="detach and keep running after the caller exits")
     p.add_argument("--fake", action="store_true", help="tests only: fixed rules instead of the model")
+    p.add_argument("--model", choices=["gliner", "gliner2"], default="gliner", help="benchmark only: which PII model")
     args = p.parse_args()
     cache = os.path.abspath(os.path.expanduser(args.cache))
     os.makedirs(cache, exist_ok=True)
@@ -595,7 +635,7 @@ def main():
         daemonize(os.path.join(cache, "server.log"))
 
     started = time.time()
-    backend = Detector(Fake(cache) if args.fake else Gliner(cache))
+    backend = Detector(Fake(cache) if args.fake else Gliner2(cache) if args.model == "gliner2" else Gliner(cache))
     backend.detect(["Warm-up: Anna Berg, anna@example.com."], ["person", "email"], 0.5)
     from media import Media
 
