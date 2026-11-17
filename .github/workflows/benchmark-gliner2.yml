@@ -30,7 +30,7 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/srv"
           "$RUNNER_TEMP/srv/bin/pip" install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          "$RUNNER_TEMP/srv/bin/pip" install --quiet "gliner>=0.2.16,<0.3" "gliner2[local]==2.1.0" huggingface_hub
+          "$RUNNER_TEMP/srv/bin/pip" install --quiet "gliner>=0.2.16,<0.3" "gliner2[local]==2.1.0" huggingface_hub sentencepiece protobuf
       - name: Scorer environment and data
         working-directory: tools/benchmark
         run: |
